@@ -258,7 +258,7 @@ pub fn run() -> tauri::Result<()> {
                     AppError::Invalid("The desktop window configuration is missing.".into())
                 })?;
             let dev_origin = app.config().build.dev_url.as_ref().map(|url| url.origin());
-            WebviewWindowBuilder::from_config(app, config)?
+            let _window = WebviewWindowBuilder::from_config(app, config)?
                 .on_navigation(move |url| {
                     (url.scheme() == "tauri" && url.host_str() == Some("localhost"))
                         || (url.scheme() == "http" && url.host_str() == Some("tauri.localhost"))
@@ -266,6 +266,8 @@ pub fn run() -> tauri::Result<()> {
                 })
                 .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
                 .build()?;
+            #[cfg(target_os = "linux")]
+            browser::recover_shell(&_window)?;
             Ok(())
         })
         .build(tauri::generate_context!())?

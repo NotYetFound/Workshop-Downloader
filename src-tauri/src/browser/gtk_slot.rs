@@ -1,11 +1,19 @@
-use std::sync::{Arc, Mutex};
+use std::{
+    cell::Cell,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, Instant},
+};
 
 use gtk::{OverlaySignals, gdk::Rectangle, prelude::*};
 use tauri::{Webview, Window};
 use url::Url;
 use webkit2gtk::{
-    PolicyDecisionExt, PolicyDecisionType, ResponsePolicyDecision, ResponsePolicyDecisionExt,
-    URIRequestExt, WebView, WebViewExt,
+    HardwareAccelerationPolicy, LoadEvent, PolicyDecisionExt, PolicyDecisionType,
+    ResponsePolicyDecision, ResponsePolicyDecisionExt, SettingsExt, URIRequestExt, WebView,
+    WebViewExt,
 };
 
 use super::{BrowserAction, BrowserBounds};
@@ -39,7 +47,11 @@ impl Container {
         Ok(Self { root, shell })
     }
 
-    pub(super) fn attach(self, slot: Arc<Mutex<Option<BrowserBounds>>>) -> Result<()> {
+    pub(super) fn attach(
+        self,
+        slot: Arc<Mutex<Option<BrowserBounds>>>,
+        interrupted: Arc<AtomicBool>,
+    ) -> Result<()> {
         let steam = self
             .root
             .children()
@@ -82,6 +94,8 @@ impl Container {
             }
             false
         });
+        let visible_slot = slot.clone();
+        recover_web_process(&steam, Some((interrupted, visible_slot)));
         let steam = steam.downgrade();
         overlay.connect_get_child_position(move |overlay, child| {
             if steam.upgrade().as_ref().map(WebView::upcast_ref) != Some(child) {
@@ -98,6 +112,49 @@ impl Container {
         });
         Ok(())
     }
+}
+
+type BrowserRecovery = (Arc<AtomicBool>, Arc<Mutex<Option<BrowserBounds>>>);
+
+pub(super) fn recover_web_process(view: &WebView, browser: Option<BrowserRecovery>) {
+    if let Some((interrupted, slot)) = browser.clone() {
+        view.connect_load_changed(move |view, event| {
+            if event == LoadEvent::Committed
+                && interrupted.swap(false, Ordering::AcqRel)
+                && slot.lock().is_ok_and(|slot| slot.is_some())
+            {
+                view.show();
+            }
+        });
+    }
+
+    let last_retry = Cell::new(None::<Instant>);
+    view.connect_web_process_terminated(move |view, reason| {
+        eprintln!("WebKit content process stopped: {reason:?}");
+        if let Some((interrupted, _)) = &browser {
+            interrupted.store(true, Ordering::Release);
+            view.hide();
+        }
+
+        // A crash can involve graphics compositing. Retry once using software
+        // compositing on this view and let repeated failures remain visible.
+        if last_retry
+            .get()
+            .is_some_and(|at| at.elapsed() < Duration::from_secs(60))
+        {
+            return;
+        }
+        last_retry.set(Some(Instant::now()));
+        if let Some(settings) = WebViewExt::settings(view) {
+            settings.set_hardware_acceleration_policy(HardwareAccelerationPolicy::Never);
+        }
+        let view = view.downgrade();
+        gtk::glib::idle_add_local_once(move || {
+            if let Some(view) = view.upgrade() {
+                view.reload();
+            }
+        });
+    });
 }
 
 pub(super) fn is_youtube_embed(url: &Url) -> bool {

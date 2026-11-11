@@ -51,19 +51,17 @@
     url.searchParams.set('workshopdesk_preview', [...new Set(ids)].join(','));
     history.replaceState(history.state, '', url.href);
   }
-  function cardInfo(link, id) {
+  function cardInfo(link, id, idForLink) {
     for (let card = link.parentElement, depth = 0; card && depth < 7; card = card.parentElement, depth++) {
       if (card === document.body) break;
       const links = [...card.querySelectorAll('a[href*="/filedetails"]')];
-      if (links.some((entry) => { const found = workshopId(entry.href); return found && found !== id; })) break;
-      if (!card.querySelector('img') || !links.some((entry) => entry.textContent.trim() && workshopId(entry.href) === id)) continue;
+      if (links.some((entry) => { const found = idForLink(entry); return found && found !== id; })) break;
+      if (!card.querySelector('img') || !links.some((entry) => entry.textContent.trim() && idForLink(entry) === id)) continue;
       const star = card.querySelector('svg.SVGIcon_Star_Filled, svg.SVGIcon_Star_Empty');
       const legacy = card.querySelector('.workshopItemRating');
       const row = star ? (star.closest('.tool-tip-source') ?? star.parentElement)
         : legacy ? (legacy.tagName === 'IMG' ? legacy.parentElement : legacy) : null;
       if (row) {
-        row.style.display = 'flex'; row.style.alignItems = 'center';
-        row.style.gap = '6px'; row.style.justifyContent = 'space-between';
         return { card, row };
       }
     }
@@ -137,13 +135,24 @@
     const browse = /\/(workshop\/browse|app\/\d+\/workshop)/.test(location.pathname);
     if (browse) {
       const cards = new Map();
+      const linkIds = new WeakMap();
+      function idForLink(link) {
+        if (!linkIds.has(link)) linkIds.set(link, workshopId(link.href));
+        return linkIds.get(link);
+      }
       for (const link of document.querySelectorAll('a[href*="/filedetails"]')) {
-        const id = workshopId(link.href);
+        const id = idForLink(link);
         if (!id) continue;
-        const info = cardInfo(link, id);
+        const info = cardInfo(link, id, idForLink);
         if (info && !cards.has(info.card)) {
           cards.set(info.card, id); controls(info.card, id);
-          if (labels[statuses.get(id)]) hosts.set(info.row, id);
+          if (labels[statuses.get(id)]) {
+            info.row.style.display = 'flex';
+            info.row.style.alignItems = 'center';
+            info.row.style.gap = '6px';
+            info.row.style.justifyContent = 'space-between';
+            hosts.set(info.row, id);
+          }
         }
       }
     }
@@ -155,15 +164,29 @@
     for (const [host, id] of hosts) { const element = badge(id); updateBadge(element, statuses.get(id)); host.append(element); }
     updateBulk();
   }
-  function schedule() { if (!scheduled) { scheduled = true; requestAnimationFrame(update); } }
+  function schedule() {
+    if (scheduled) return;
+    scheduled = true;
+    setTimeout(update, 100);
+  }
   window.addEventListener('workshop-desk-downloaded', ({ detail }) => {
     if (!detail || typeof detail !== 'object' || Array.isArray(detail)) return;
-    statuses = new Map(Object.entries(detail).filter(([id,status]) => /^[0-9]{1,20}$/.test(id) && typeof status === 'string'));
+    const next = new Map(Object.entries(detail).filter(([id,status]) => /^[0-9]{1,20}$/.test(id) && Object.hasOwn(labels, status)));
+    if (next.size === statuses.size && [...next].every(([id, status]) => statuses.get(id) === status)) return;
+    statuses = next;
     schedule();
   });
   function start() {
     schedule();
-    new MutationObserver(schedule).observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['href', 'data-publishedfileid'] });
+    const relevant = 'a[href*="/filedetails"], .workshopItemTitle, .workshopItemRating, svg.SVGIcon_Star_Filled, svg.SVGIcon_Star_Empty';
+    const owns = '[data-workshop-desk-controls], [data-workshop-desk-badge], [data-workshop-desk-bulk]';
+    const matches = (node) => node instanceof Element && !node.matches(owns)
+      && (node.matches(relevant) || node.querySelector(relevant));
+    new MutationObserver((records) => {
+      if (records.some((record) => record.type === 'attributes'
+        ? record.target.matches('a[href*="/filedetails"], [data-publishedfileid]')
+        : [...record.addedNodes, ...record.removedNodes].some(matches))) schedule();
+    }).observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['href', 'data-publishedfileid'] });
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, { once: true }); else start();
 })();

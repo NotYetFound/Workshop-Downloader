@@ -201,12 +201,17 @@ pub(super) fn private_workspace(
     Ok(command)
 }
 
+pub(super) enum TerminalEvent<'a> {
+    Line { text: &'a str, complete: bool },
+    Tick,
+}
+
 pub(super) fn run(
     command: CommandBuilder,
     title: String,
     control: &Control,
     idle_timeout: Duration,
-    mut on_output: impl FnMut(&str, bool),
+    mut on_output: impl FnMut(TerminalEvent<'_>),
 ) -> std::result::Result<portable_pty::ExitStatus, ProviderError> {
     let transcript = super::transcript::Transcript::start(title);
     transcript.detail("Starting the backend process.");
@@ -270,6 +275,7 @@ pub(super) fn run(
     let mut last_activity = Instant::now();
     let mut stream_closed = false;
     let mut exit = None;
+    let mut last_tick = Instant::now();
     let outcome = loop {
         if control.cancelled() {
             break Err(process_error("Download cancelled."));
@@ -290,9 +296,16 @@ pub(super) fn run(
             last_activity = Instant::now();
         }
 
+        if last_tick.elapsed() >= Duration::from_secs(1) {
+            on_output(TerminalEvent::Tick);
+            last_tick = Instant::now();
+        }
         let mut publish = |line: &str, complete| {
             let was_hidden = control.hide_output.load(Ordering::Acquire);
-            on_output(line, complete);
+            on_output(TerminalEvent::Line {
+                text: line,
+                complete,
+            });
             if complete && !was_hidden && !sensitive_output(line) {
                 let mut text = line.to_owned();
                 for secret in &secrets {

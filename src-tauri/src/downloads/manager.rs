@@ -1000,7 +1000,7 @@ impl Shared {
                     *last_progress = Instant::now();
                 }
             }
-            Event::Bytes(bytes) => {
+            Event::Bytes(bytes) | Event::StagedBytes(bytes) => {
                 job.downloaded_bytes = Some(bytes);
                 self.storage.put_job(job)?;
             }
@@ -1379,7 +1379,11 @@ mod tests {
                 "Test engine".into(),
                 control,
                 Duration::from_secs(8),
-                |line, _| {
+                |event| {
+                    let super::super::process::TerminalEvent::Line { text: line, .. } = event
+                    else {
+                        return;
+                    };
                     if line.trim() == "password:" {
                         control.set_prompt(Some(super::super::PromptKind::Password));
                     } else if line.trim() == "Steam Guard code:" {

@@ -77,7 +77,7 @@
             <div class="download-meta">
               <span>{games.find((game) => game.appId === job.item.appId)?.name ?? 'App ' + job.item.appId}</span>
               <span>{backendName(job.provider)}</span>
-              {#if job.downloadedBytes !== null}<span>{formatBytes(job.downloadedBytes)}</span>{/if}
+              {#if job.downloadedBytes !== null}<span>{formatBytes(job.downloadedBytes)}{job.provider === 'steamcmd' && job.status === 'downloading' ? ' staged' : ''}</span>{/if}
               {#if states[job.item.id] && ['missingFiles', 'downloadedExternally'].includes(states[job.item.id].status)}
                 <span class:warning-text={states[job.item.id].status === 'missingFiles'}>{contentLabels[states[job.item.id].status]}</span>
               {/if}
@@ -90,7 +90,7 @@
               {#if job.percent !== null}
                 <progress aria-label={'Progress for ' + job.item.title} max="100" value={job.percent}></progress>
                 <small>{job.percent.toFixed(1)}%{job.bytesPerSecond !== null ? ' · ' + formatBytes(job.bytesPerSecond) + '/s' : ''}</small>
-              {:else}<progress aria-label={'Progress for ' + job.item.title}></progress>{/if}
+              {:else if job.status === 'downloading' && job.downloadedBytes === null}<small>Waiting for transfer data</small>{/if}
             {/if}
           </div>
           <div class="job-actions">

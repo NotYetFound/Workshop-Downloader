@@ -2,9 +2,12 @@
 mod gtk_slot;
 
 use std::path::PathBuf;
-#[cfg(target_os = "linux")]
-use std::sync::Arc;
 use std::sync::Mutex;
+#[cfg(target_os = "linux")]
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 use serde::{Deserialize, Serialize};
 use tauri::{
@@ -60,6 +63,7 @@ pub struct BrowserState {
     pub item_id: Option<String>,
     pub app_id: Option<u32>,
     pub open: bool,
+    pub interrupted: bool,
 }
 
 pub struct Browser {
@@ -67,6 +71,8 @@ pub struct Browser {
     preview_request: Mutex<Option<Vec<String>>>,
     #[cfg(target_os = "linux")]
     slot: Arc<Mutex<Option<BrowserBounds>>>,
+    #[cfg(target_os = "linux")]
+    interrupted: Arc<AtomicBool>,
 }
 
 impl Browser {
@@ -76,6 +82,8 @@ impl Browser {
             preview_request: Mutex::new(None),
             #[cfg(target_os = "linux")]
             slot: Arc::new(Mutex::new(None)),
+            #[cfg(target_os = "linux")]
+            interrupted: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -122,6 +130,10 @@ impl Browser {
             app_id: url.as_ref().and_then(steam::app_id),
             url: url.map(|url| url.to_string()),
             open: view.is_some(),
+            #[cfg(target_os = "linux")]
+            interrupted: self.interrupted.load(Ordering::Acquire),
+            #[cfg(not(target_os = "linux"))]
+            interrupted: false,
         })
     }
 
@@ -143,6 +155,10 @@ impl Browser {
             gtk_slot::refresh(&view)?;
             #[cfg(not(target_os = "linux"))]
             view.set_bounds(bounds.rect())?;
+            #[cfg(target_os = "linux")]
+            if self.interrupted.load(Ordering::Acquire) {
+                return Ok(());
+            }
             view.show()?;
         } else if let Some(view) = app.get_webview(STEAM_VIEW) {
             view.hide()?;
@@ -227,12 +243,18 @@ impl Browser {
         let rect = bounds.rect();
         let view = window.add_child(builder, rect.position, rect.size)?;
         #[cfg(target_os = "linux")]
-        if let Err(error) = container.attach(self.slot.clone()) {
+        if let Err(error) = container.attach(self.slot.clone(), self.interrupted.clone()) {
             let _ = view.close();
             return Err(error);
         }
         Ok(view)
     }
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn recover_shell(view: &tauri::WebviewWindow) -> Result<()> {
+    view.with_webview(|platform| gtk_slot::recover_web_process(&platform.inner(), None))?;
+    Ok(())
 }
 
 fn preview_request(url: &Url) -> Option<Vec<String>> {

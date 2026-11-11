@@ -11,7 +11,7 @@ use ts_rs::TS;
 
 use super::{
     BackendChoice, FailureKind, ProviderError, files,
-    process::{self, Control, PromptKind},
+    process::{self, Control, PromptKind, TerminalEvent},
 };
 use crate::{settings::Settings, steam::WorkshopItem};
 
@@ -64,6 +64,7 @@ pub(super) enum Event {
     Downloading,
     Percent(f32),
     Bytes(u64),
+    StagedBytes(u64),
     Note(&'static str),
     Exit(u32),
 }
@@ -494,8 +495,12 @@ fn probe(id: BackendChoice, command: CommandBuilder) -> Result<Option<String>, P
         format!("{} version check", id.name()),
         &Control::default(),
         Duration::from_secs(45),
-        |line, complete| {
-            if complete {
+        |event| {
+            if let TerminalEvent::Line {
+                text: line,
+                complete: true,
+            } = event
+            {
                 sandbox_error |= sandbox_failed(line);
                 let candidate = if id == BackendChoice::SteamCmd {
                     line.strip_prefix("Steam Console Client")
@@ -550,6 +555,8 @@ fn download(
     let mut sandbox_error = false;
     let mut last_prompt = None;
     let mut started = false;
+    let mut staged_bytes = 0;
+    let steam_paths = (backend == BackendChoice::SteamCmd).then(|| steam_workshop_paths(request));
     let signing_in = request.account.is_some() || request.qr;
     control.hide_output(signing_in);
     let status = process::run(
@@ -557,7 +564,21 @@ fn download(
         format!("{} · {}", backend.name(), request.item.title),
         control,
         Duration::from_secs(600),
-        |line, complete| {
+        |event| {
+            let (line, complete) = match event {
+                TerminalEvent::Line { text, complete } => (text, complete),
+                TerminalEvent::Tick => {
+                    if started
+                        && let Some(paths) = &steam_paths
+                        && let Some(bytes) = paths.iter().filter_map(|path| staged_size(path)).max()
+                        && bytes > staged_bytes
+                    {
+                        staged_bytes = bytes;
+                        report(Event::StagedBytes(bytes));
+                    }
+                    return;
+                }
+            };
             if request.qr && complete {
                 if line.trim() == "Use the Steam Mobile App to sign in with this QR code:" {
                     control.set_prompt(Some(PromptKind::Qr));
@@ -672,6 +693,57 @@ fn download(
             status.exit_code()
         ),
     ))
+}
+
+// SteamCMD reports a final byte count for Workshop items. Sample only the
+// current item's private staging trees while it works. Staging bytes may be
+// preallocated or unpacked and are independent of network bytes and percentage.
+fn steam_workshop_paths(request: &DownloadRequest<'_>) -> [PathBuf; 4] {
+    let app = request.item.app_id.to_string();
+    let temporary = Path::new("steamapps/workshop/downloads")
+        .join(&app)
+        .join(&request.item.id);
+    let completed = Path::new("steamapps/workshop/content")
+        .join(app)
+        .join(&request.item.id);
+    let requested = request.stage.join("content");
+    let tool = request.runtime.join("steamcmd/tool");
+    [
+        requested.join(&temporary),
+        tool.join(temporary),
+        requested.join(&completed),
+        tool.join(completed),
+    ]
+}
+
+fn staged_size(root: &Path) -> Option<u64> {
+    files::ensure_directory(root, false).ok()?;
+    let mut pending = vec![(root.to_owned(), 0)];
+    let mut remaining = 10_000usize;
+    let mut bytes = 0u64;
+    while let Some((directory, depth)) = pending.pop() {
+        if depth > 16 {
+            return None;
+        }
+        for entry in fs::read_dir(directory).ok()? {
+            remaining = remaining.checked_sub(1)?;
+            let entry = entry.ok()?;
+            let meta = fs::symlink_metadata(entry.path()).ok()?;
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::MetadataExt;
+                if meta.file_attributes() & 0x400 != 0 {
+                    continue;
+                }
+            }
+            if meta.file_type().is_file() {
+                bytes = bytes.checked_add(meta.len())?;
+            } else if meta.file_type().is_dir() {
+                pending.push((entry.path(), depth + 1));
+            }
+        }
+    }
+    Some(bytes)
 }
 
 fn sandbox_failed(line: &str) -> bool {
@@ -900,6 +972,19 @@ mod tests {
         );
         assert!(FailureKind::Unsupported.can_fallback());
         assert!(!FailureKind::Ownership.can_fallback());
+    }
+
+    #[test]
+    fn steam_staging_reports_file_sizes_without_following_links() {
+        let root = tempfile::tempdir().unwrap();
+        let nested = root.path().join("nested");
+        fs::create_dir(&nested).unwrap();
+        fs::write(root.path().join("first"), b"abc").unwrap();
+        fs::write(nested.join("second"), b"12345").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&nested, root.path().join("linked")).unwrap();
+        assert_eq!(staged_size(root.path()), Some(8));
+        assert_eq!(staged_size(&root.path().join("missing")), None);
     }
 
     #[test]

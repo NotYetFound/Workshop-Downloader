@@ -15,6 +15,7 @@
   import { contentLabels, desktop, downloadOptions, errorMessage, signInAvailable } from './lib/desktop';
   import type { BackendChoice } from './lib/contracts/BackendChoice';
   import type { ItemDownloadState } from './lib/contracts/ItemDownloadState';
+  import { updateQueueOrder } from './lib/downloadDisplay';
   import type { QueueOptions } from './lib/contracts/QueueOptions';
   import type { BrowserAction } from './lib/contracts/BrowserAction';
   import type { BrowserState } from './lib/contracts/BrowserState';
@@ -153,15 +154,12 @@
       ?? [...jobs].reverse().find((job) => job.status === 'queued')
       ?? recentCompletion,
   );
-  const downloadPosition = $derived.by(() => {
-    if (!currentDownload) return { index: 1, total: 1 };
-    for (const { batch } of batches) {
-      const jobIds = batch.items.flatMap((entry) => entry.jobId && !entry.skipped ? [entry.jobId] : []);
-      const index = jobIds.indexOf(currentDownload.id);
-      if (index !== -1) return { index: index + 1, total: jobIds.length };
-    }
-    return { index: 1, total: 1 };
+  let queueOrder = $state<string[]>([]);
+  const downloadPosition = $derived({
+    index: Math.max(0, queueOrder.indexOf(currentDownload?.id ?? '')) + 1,
+    total: Math.max(1, queueOrder.length),
   });
+
   let jobStatuses = new Map<string, DownloadStatus>();
   let haveJobSnapshot = false;
 
@@ -284,10 +282,7 @@
     }, 500);
     const downloadsTimer = window.setInterval(() => void refreshDownloads(), 750);
     const badgeTimer = window.setInterval(() => {
-      if (page === 'browse' && browser?.open) {
-        void refreshItemDownload();
-        void refreshBadges();
-      }
+      if (settings) void refreshBadges();
     }, 2300);
     return () => {
       void closeDownloadMenu();
@@ -390,12 +385,8 @@
     const revision = historyRevision;
     try {
       await desktop.syncDownloadAuthWindow().catch((failure) => showDownloadError(errorMessage(failure)));
-      const [nextJobs, nextStates] = await Promise.all([desktop.downloads(), desktop.contentStates()]);
-      // Batch and job rows are created together. Read membership after the job snapshot.
-      const nextBatches = await desktop.batches();
+      const nextJobs = await desktop.downloads();
       if (revision !== historyRevision) return;
-      batches = nextBatches;
-      states = nextStates;
       if (haveJobSnapshot) {
         const changed = nextJobs.filter((job) => jobStatuses.get(job.id) !== job.status);
         const completed = changed.find((job) => job.status === 'completed');
@@ -403,10 +394,15 @@
         const failed = changed.find((job) => job.status === 'failed');
         if (failed) showDownloadError(failed.error ?? 'The engine stopped before the download completed.', failed.item.title);
       }
+      queueOrder = updateQueueOrder(queueOrder, nextJobs, jobStatuses);
       jobStatuses = new Map(nextJobs.map((job) => [job.id, job.status]));
       haveJobSnapshot = true;
       jobs = nextJobs;
       jobsFailed = false;
+      if (page === 'downloads') {
+        const nextBatches = await desktop.batches();
+        if (revision === historyRevision) batches = nextBatches;
+      }
     } catch (failure) {
       if (page === 'downloads') {
         jobsFailed = true;
@@ -435,8 +431,13 @@
   async function refreshBadges() {
     if (checkingBadges) return;
     checkingBadges = true;
+    const revision = historyRevision;
     try {
-      await desktop.syncDownloadedBadges();
+      const next = await desktop.contentStates();
+      if (revision !== historyRevision) return;
+      states = next;
+      if (browser?.itemId) itemDownload = next[browser.itemId] ?? null;
+      if (page === 'browse' && browser?.open && !browser.interrupted) await desktop.syncDownloadedBadges();
     } catch (failure) {
       error = errorMessage(failure);
     } finally {
@@ -648,9 +649,12 @@
           </div>
         {/if}
         <div class="browser-slot" class:covered={!!preview || previewLoading || !!previewError} bind:this={slotElement}>
-          {#if !browser?.open}
+          {#if !browser?.open || browser.interrupted}
             <div class="browser-placeholder">
-              {#if error}
+              {#if browser?.interrupted}
+                <span role="status">The Steam webview was interrupted.</span>
+                <button class="button" type="button" onclick={() => browserAction('refresh')}>Reload Steam Workshop</button>
+              {:else if error}
                 <button class="button" type="button" onclick={() => { error = ''; void updateSlot(slotElement); }}>Retry loading Steam Workshop</button>
               {:else}
                 <span role="status">Opening Steam Workshop…</span>

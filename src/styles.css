@@ -437,11 +437,8 @@ input::placeholder { color: var(--faint); opacity: 1; }
 .sidebar-progress-size, .sidebar-progress-status > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sidebar-progress-track { height: 5px; margin: 8px 0 5px; border-radius: 4px; overflow: hidden; background: var(--control-line); }
 .sidebar-progress-fill { height: 100%; border-radius: inherit; background: var(--accent); transition: width 180ms ease-out; }
-.sidebar-progress-fill.indeterminate { min-width: 30%; animation: sidebar-transfer 1.6s ease-in-out infinite; }
-@keyframes sidebar-transfer { from { transform: translateX(-100%); } to { transform: translateX(335%); } }
 @media (prefers-reduced-motion: reduce) {
   .sidebar-progress-fill { transition: none; }
-  .sidebar-progress-fill.indeterminate { animation: none; opacity: .7; }
 }
 .sidebar-progress-status { display: flex; justify-content: space-between; gap: 6px; color: var(--muted); font-size: 11px; margin-top: 4px; }
 .sidebar-download-error { border-color: #a26166; }
