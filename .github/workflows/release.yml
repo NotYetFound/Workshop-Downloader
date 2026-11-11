@@ -3,12 +3,21 @@ name: Draft release
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing release tag to build
+        required: true
+        type: string
+
+env:
+  WORKSHOP_RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ inputs.release_tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -26,6 +35,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: refs/tags/${{ env.WORKSHOP_RELEASE_TAG }}
       - uses: actions/setup-node@v6
         with:
           node-version: 24
@@ -48,7 +59,7 @@ jobs:
       - shell: bash
         run: |
           version="$(node -p 'require("./src-tauri/tauri.conf.json").version')"
-          test "$GITHUB_REF_NAME" = "v$version"
+          test "$WORKSHOP_RELEASE_TAG" = "v$version"
       - run: npm ci
       - name: Configure optional updater signing
         id: signing
@@ -89,6 +100,8 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: refs/tags/${{ env.WORKSHOP_RELEASE_TAG }}
       - uses: actions/download-artifact@v7
         with:
           pattern: workshop-downloader-*
@@ -99,16 +112,16 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y minisign
-          python3 .github/prepare_release.py release-input release-assets
+          GITHUB_REF_NAME="$WORKSHOP_RELEASE_TAG" python3 .github/prepare_release.py release-input release-assets
       - name: Upload to draft release
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            test "$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft)" = true
-            gh release upload "$GITHUB_REF_NAME" release-assets/* --clobber
+          if gh release view "$WORKSHOP_RELEASE_TAG" >/dev/null 2>&1; then
+            test "$(gh release view "$WORKSHOP_RELEASE_TAG" --json isDraft --jq .isDraft)" = true
+            gh release upload "$WORKSHOP_RELEASE_TAG" release-assets/* --clobber
           else
-            gh release create "$GITHUB_REF_NAME" release-assets/* --verify-tag --draft \
-              --title "Workshop Downloader $GITHUB_REF_NAME" --notes-file docs/release-notes.md
+            gh release create "$WORKSHOP_RELEASE_TAG" release-assets/* --verify-tag --draft \
+              --title "Workshop Downloader $WORKSHOP_RELEASE_TAG" --notes-file docs/release-notes.md
           fi
