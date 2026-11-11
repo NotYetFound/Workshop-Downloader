@@ -7,15 +7,13 @@
   import { onMount, tick } from 'svelte';
   import BrowserBar from './lib/components/BrowserBar.svelte';
   import DownloadProgress from './lib/components/DownloadProgress.svelte';
-  import DownloadAuthentication from './lib/components/DownloadAuthentication.svelte';
   import DownloadOptions from './lib/components/DownloadOptions.svelte';
   import DownloadsView from './lib/components/DownloadsView.svelte';
   import IconButton from './lib/components/IconButton.svelte';
   import SettingsView from './lib/components/SettingsView.svelte';
   import { closeDownloadMenu, showDownloadMenu } from './lib/downloadMenu';
-  import { contentLabels, desktop, errorMessage } from './lib/desktop';
+  import { contentLabels, desktop, downloadOptions, errorMessage, signInAvailable } from './lib/desktop';
   import type { BackendChoice } from './lib/contracts/BackendChoice';
-  import type { AuthPrompt } from './lib/contracts/AuthPrompt';
   import type { ItemDownloadState } from './lib/contracts/ItemDownloadState';
   import type { QueueOptions } from './lib/contracts/QueueOptions';
   import type { BrowserAction } from './lib/contracts/BrowserAction';
@@ -28,6 +26,7 @@
   type Page = 'browse' | 'downloads' | 'settings';
   let page = $state<Page>('browse');
   let settings = $state<Settings | null>(null);
+  let setup = $state(false);
   let browser = $state<BrowserState | null>(null);
   let jobs = $state<DownloadJob[]>([]);
   let batches = $state<BatchProgress[]>([]);
@@ -95,13 +94,13 @@
 
   async function confirmSingleItem() {
     if (!singleRequest || !settings || downloadBusy) return;
-    if (settings.signIn && !settings.steamAccount.trim()) {
+    if (settings.signIn && !signInAvailable(settings, settings.backend)) {
       showDownloadError('Enter your Steam account name in Preferences.');
       await showPage('settings');
       return;
     }
     const request = singleRequest;
-    const options = { backend: settings.backend, replace: false, account: settings.signIn ? settings.steamAccount.trim() : null };
+    const options = downloadOptions(settings, settings.backend, settings.signIn);
     downloadBusy = true;
     try {
       await desktop.queueDownload(
@@ -145,7 +144,6 @@
   let itemDownload = $state<ItemDownloadState | null>(null);
   let requestedItem = $state<string | null>(null);
   let retryJob = $state<DownloadJob | null>(null);
-  let authPrompt = $state<AuthPrompt | null>(null);
   let downloadBusy = $state(false);
   let downloadAlert = $state<{ title: string; detail: string } | null>(null);
   let recentCompletion = $state<DownloadJob | null>(null);
@@ -166,7 +164,6 @@
   });
   let jobStatuses = new Map<string, DownloadStatus>();
   let haveJobSnapshot = false;
-  let lastPrompt = '';
 
   function showDownloadError(detail: string, title = 'Download issue') {
     downloadAlert = { title, detail };
@@ -202,19 +199,17 @@
     }
     if (collection) { await openPreview(id, [], override); return; }
     const signIn = override?.signIn ?? settings.signIn;
-    if (signIn && !settings.steamAccount.trim()) {
+    const backend = override?.backend ?? settings.backend;
+    if (signIn && !signInAvailable(settings, backend)) {
       showDownloadError('Enter your Steam account name in Preferences.');
       await showPage('settings');
       return;
     }
     requestedItem = browser.itemId;
-    await queueDownload({
-      backend: override?.backend ?? settings.backend,
-      replace: false,
-      account: signIn ? settings.steamAccount.trim() : null,
-    });
+    await queueDownload(downloadOptions(settings, backend, signIn));
   }
   let checkingDownloads = false;
+  let historyRevision = 0;
   let checkingItem = false;
   let checkingBadges = false;
   let address = $state('');
@@ -332,6 +327,10 @@
     startupError = '';
     try {
       settings = await desktop.getSettings();
+      if (!settings.setupComplete) {
+        setup = true;
+        page = 'settings';
+      }
     } catch (failure) {
       startupError = errorMessage(failure);
     }
@@ -388,18 +387,13 @@
   async function refreshDownloads() {
     if (checkingDownloads || !settings) return;
     checkingDownloads = true;
+    const revision = historyRevision;
     try {
-      authPrompt = await desktop.downloadPrompt();
-      if (authPrompt) {
-        const key = authPrompt.jobId + ':' + authPrompt.kind;
-        if (key !== lastPrompt) {
-          lastPrompt = key;
-          await showPage('settings');
-        }
-      } else lastPrompt = '';
+      await desktop.syncDownloadAuthWindow().catch((failure) => showDownloadError(errorMessage(failure)));
       const [nextJobs, nextStates] = await Promise.all([desktop.downloads(), desktop.contentStates()]);
       // Batch and job rows are created together. Read membership after the job snapshot.
       const nextBatches = await desktop.batches();
+      if (revision !== historyRevision) return;
       batches = nextBatches;
       states = nextStates;
       if (haveJobSnapshot) {
@@ -453,6 +447,7 @@
   async function showPage(next: Page) {
     if (next === page) return;
     closePreview();
+    if (next !== 'settings') setup = false;
     page = next;
     error = '';
     void closeDownloadMenu();
@@ -499,6 +494,29 @@
     }
   }
 
+  let clearingHistory = $state(false);
+
+  async function clearHistory() {
+    if (clearingHistory || activeJobCount) return;
+    clearingHistory = true;
+    try {
+      if (!await desktop.confirmClearHistory()) return;
+      await desktop.clearDownloadHistory();
+      historyRevision++;
+      jobStatuses.clear();
+      retryJob = null;
+      downloadAlert = null;
+      recentCompletion = null;
+      jobs = [];
+      batches = [];
+      await refreshDownloads();
+    } catch (failure) {
+      showDownloadError(errorMessage(failure));
+    } finally {
+      clearingHistory = false;
+    }
+  }
+
   async function jobAction(action: () => Promise<void>) {
     error = '';
     try {
@@ -522,6 +540,7 @@
 
   function updateSettings(next: Settings) {
     settings = next;
+    if (setup) { setup = false; void showPage('browse'); }
     void closeDownloadMenu();
     inspection = null;
   }
@@ -569,7 +588,7 @@
           bind:address bind:editing={editingAddress} disabled={navigating || !browser?.open}
           onAction={browserAction} onAddress={browseAddress} onGame={browseGame} onManage={() => showPage('settings')} />
       {:else}
-        <header class="workspace-header"><h1>{page === 'downloads' ? 'Downloads' : 'Preferences'}</h1></header>
+        <header class="workspace-header"><h1>{page === 'downloads' ? 'Downloads' : setup ? 'Setup' : 'Preferences'}</h1></header>
       {/if}
 
       {#if error}
@@ -643,14 +662,21 @@
         <div class="scroll-page downloads-page">
           <div class="downloads-overview">
             <p>{jobs.length} {jobs.length === 1 ? 'item' : 'items'} in your history{batches.length ? ' · ' + batches.length + (batches.length === 1 ? ' batch' : ' batches') : ''}</p>
-            <span class="overview-chip" class:idle={!activeJobCount}>{activeJobCount} in progress</span>
+            <div class="downloads-overview-actions">
+              <span class="overview-chip" class:idle={!activeJobCount}>{activeJobCount} in progress</span>
+              <button class="button" type="button" onclick={clearHistory}
+                disabled={clearingHistory || activeJobCount > 0 || (!jobs.length && !batches.length)}
+                title={activeJobCount ? 'Finish or cancel queued downloads first' : 'Clear download history'}>
+                Clear history
+              </button>
+            </div>
           </div>
           {#if retryJob}
             {#key retryJob.id}
               <div class="retry-panel">
                 <strong>{retryJob.status === 'queued' ? 'Resume' : 'Retry'} {retryJob.item.title}</strong>
                 <DownloadOptions backend={retryJob.requestedBackend} allowReplace={retryJob.replace} replace={retryJob.replace}
-                  accountName={settings.steamAccount} signedIn={settings.signIn || retryJob.accountRequired || retryJob.failureKind === 'authentication'} busy={downloadBusy}
+                  {settings} signedIn={settings.signIn || retryJob.accountRequired || retryJob.failureKind === 'authentication'} busy={downloadBusy}
                   label={retryJob.status === 'queued' ? 'Resume' : 'Retry download'}
                   onSubmit={retryDownload} onClose={() => retryJob = null} />
               </div>
@@ -672,12 +698,7 @@
       {/if}
 
       <div class="scroll-page" hidden={page !== 'settings'}>
-        {#if authPrompt}
-          {#key authPrompt.jobId + ':' + authPrompt.kind}
-            <DownloadAuthentication prompt={authPrompt} onCancel={cancelDownload} />
-          {/key}
-        {/if}
-        <SettingsView {settings} {states} onSaved={updateSettings} onImported={() => { void refreshDownloads(); void refreshItemDownload(); void refreshBadges(); }} />
+        <SettingsView {settings} {states} {setup} onSetup={() => setup = true} onCloseSetup={() => setup = false} onSaved={updateSettings} onImported={() => { void refreshDownloads(); void refreshItemDownload(); void refreshBadges(); }} />
       </div>
     {/if}
   </main>

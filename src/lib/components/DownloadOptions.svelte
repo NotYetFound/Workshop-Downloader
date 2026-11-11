@@ -1,15 +1,16 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  import { backendNames } from '../desktop';
+  import { backendNames, downloadOptions, signInAvailable, usesDepotQr } from '../desktop';
+  import type { Settings } from '../contracts/Settings';
   import type { BackendChoice } from '../contracts/BackendChoice';
   import type { QueueOptions } from '../contracts/QueueOptions';
 
-  let { backend, allowReplace = false, replace = false, signedIn = false, accountName = '', busy, label, onSubmit, onClose }: {
+  let { backend, allowReplace = false, replace = false, signedIn = false, settings, busy, label, onSubmit, onClose }: {
     backend: BackendChoice;
     allowReplace?: boolean;
     replace?: boolean;
     signedIn?: boolean;
-    accountName?: string;
+    settings: Settings;
     busy: boolean;
     label: string;
     onSubmit: (options: QueueOptions) => Promise<boolean>;
@@ -23,9 +24,7 @@
 
   async function submit(event: SubmitEvent) {
     event.preventDefault();
-    if (await onSubmit({ backend: selected, replace: replaceExisting, account: useAccount ? accountName.trim() : null })) {
-
-    }
+    await onSubmit(downloadOptions(settings, selected, useAccount, replaceExisting));
   }
 </script>
 
@@ -34,12 +33,12 @@
     {#each Object.entries(backendNames) as [id, name]}<option value={id}>{name}</option>{/each}
   </select></label>
   <label><input type="checkbox" bind:checked={useAccount} disabled={busy} /> Sign in with Steam</label>
-  {#if useAccount}<span class="field-note">Account from Preferences: {accountName || 'Set an account name first'}</span>{/if}
+  {#if useAccount}<span class="field-note">{usesDepotQr(settings, selected) ? 'Steam mobile app QR code' : settings.steamAccount || 'Set an account name in Preferences'}</span>{/if}
   {#if allowReplace}
     <label><input type="checkbox" bind:checked={replaceExisting} disabled={busy} /> Replace existing folder</label>
   {/if}
   <div class="download-option-actions">
     <button type="button" class="button" onclick={onClose} disabled={busy}>Close</button>
-    <button type="submit" class="button primary" disabled={busy || (useAccount && !accountName.trim())}>{busy ? 'Working…' : label}</button>
+    <button type="submit" class="button primary" disabled={busy || (useAccount && !signInAvailable(settings, selected))}>{busy ? 'Working…' : label}</button>
   </div>
 </form>

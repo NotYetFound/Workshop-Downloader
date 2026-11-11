@@ -30,6 +30,8 @@ pub struct BackendInfo {
     pub backend: BackendChoice,
     pub path: Option<String>,
     pub version: Option<String>,
+    pub managed: bool,
+    pub can_restore: bool,
     pub state: BackendState,
     pub message: Option<String>,
 }
@@ -49,6 +51,7 @@ pub(super) struct DownloadRequest<'a> {
     pub stage: &'a Path,
     pub runtime: &'a Path,
     pub account: Option<&'a str>,
+    pub qr: bool,
 }
 
 pub(super) struct Payload {
@@ -93,6 +96,7 @@ pub(super) fn eligible(
     settings: &Settings,
     choice: BackendChoice,
     signed_in: bool,
+    tools: &Path,
 ) -> Vec<Candidate> {
     providers
         .iter()
@@ -103,18 +107,40 @@ pub(super) fn eligible(
         .filter_map(|&provider| {
             Some(Candidate {
                 provider,
-                executable: provider.detect(settings)?,
+                executable: detection(provider, settings, tools)?.0,
             })
         })
         .collect()
 }
 
-pub(super) fn inspect(settings: &Settings, workspace: Option<&Path>) -> Vec<BackendInfo> {
+fn detection(
+    provider: &dyn DownloadProvider,
+    settings: &Settings,
+    tools: &Path,
+) -> Option<(PathBuf, bool)> {
+    let backend = provider.id();
+    let manual = match backend {
+        BackendChoice::SteamCmd => settings.steamcmd_path.is_some(),
+        BackendChoice::DepotDownloader => settings.depot_downloader_path.is_some(),
+        BackendChoice::Automatic => false,
+    };
+    if !manual && let Some(path) = super::tools::detected(tools, backend) {
+        return Some((path, true));
+    }
+    provider.detect(settings).map(|path| (path, false))
+}
+
+pub(super) fn inspect(
+    settings: &Settings,
+    tools: &Path,
+    workspace: Option<&Path>,
+) -> Vec<BackendInfo> {
     PROVIDERS
         .iter()
         .map(|provider| {
             let backend = provider.id();
-            let path = provider.detect(settings);
+            let candidate = detection(*provider, settings, tools);
+            let path = candidate.as_ref().map(|(path, _)| path);
             let (state, version, message) = match (&path, workspace) {
                 (None, _) => (
                     BackendState::Missing,
@@ -130,6 +156,8 @@ pub(super) fn inspect(settings: &Settings, workspace: Option<&Path>) -> Vec<Back
             BackendInfo {
                 backend,
                 path: path.map(|path| path.to_string_lossy().into_owned()),
+                managed: candidate.is_some_and(|(_, managed)| managed),
+                can_restore: super::tools::can_restore(tools, backend),
                 version,
                 state,
                 message,
@@ -157,7 +185,7 @@ impl DownloadProvider for SteamCmd {
         {
             return Some(path);
         }
-        from_path(if cfg!(windows) {
+        discover(if cfg!(windows) {
             &["steamcmd.exe"]
         } else {
             &["steamcmd.sh", "steamcmd"]
@@ -214,7 +242,7 @@ impl DownloadProvider for DepotDownloader {
         if let Some(path) = &settings.depot_downloader_path {
             return executable(Path::new(path));
         }
-        from_path(if cfg!(windows) {
+        discover(if cfg!(windows) {
             &["DepotDownloader.exe"]
         } else {
             &["DepotDownloader", "depotdownloader"]
@@ -241,10 +269,20 @@ impl DownloadProvider for DepotDownloader {
     ) -> Result<Payload, ProviderError> {
         let directory = request.stage.join("content");
         fs::create_dir_all(&directory).map_err(file_error)?;
-        let mut command = base_command(executable, request.stage);
-        isolate_home(&mut command, &request.stage.join("home"))?;
+        let runtime = request.runtime.join("depotDownloader");
+        files::ensure_directory(&runtime, true).map_err(unsafe_workspace)?;
+        let mut command = base_command(executable, &runtime);
+        isolate_home(&mut command, &runtime.join("home"))?;
         command.args(depot_args(request.item, &directory, request.account));
-        let command = process::private_workspace(command, request.stage, None, true)?;
+        if request.qr {
+            command.arg("-qr");
+        }
+        // .NET on Windows resolves IsolatedStorage through Windows known folders.
+        // Only request a persistent token when the CLI's home can be isolated.
+        if cfg!(target_os = "linux") && (request.account.is_some() || request.qr) {
+            command.arg("-remember-password");
+        }
+        let command = process::private_workspace(command, request.stage, Some(&runtime), true)?;
         let output = download(self.id(), command, request, control, report)?;
         Ok(Payload {
             path: directory,
@@ -276,8 +314,31 @@ fn executable(path: &Path) -> Option<PathBuf> {
     Some(path.to_path_buf())
 }
 
-fn from_path(names: &[&str]) -> Option<PathBuf> {
-    std::env::split_paths(&std::env::var_os("PATH")?)
+fn discover(names: &[&str]) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let mut directories = std::env::split_paths(&path).collect::<Vec<_>>();
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+            directories.push(home.join(".local/bin"));
+            directories.push(home.join("bin"));
+        }
+        directories.extend(["/usr/local/bin", "/usr/bin", "/usr/games"].map(PathBuf::from));
+    }
+    #[cfg(windows)]
+    {
+        if let Some(local) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from) {
+            directories.push(local.join("Microsoft/WinGet/Links"));
+            directories.push(local.join("Programs/DepotDownloader"));
+            directories.push(local.join("Programs/SteamCMD"));
+        }
+        if let Some(programs) = std::env::var_os("ProgramFiles").map(PathBuf::from) {
+            directories.push(programs.join("SteamCMD"));
+            directories.push(programs.join("DepotDownloader"));
+        }
+    }
+    directories
+        .into_iter()
         .filter(|dir| dir.is_absolute())
         .find_map(|dir| names.iter().find_map(|name| executable(&dir.join(name))))
 }
@@ -430,6 +491,7 @@ fn probe(id: BackendChoice, command: CommandBuilder) -> Result<Option<String>, P
     let mut sandbox_error = false;
     let status = process::run(
         command,
+        format!("{} version check", id.name()),
         &Control::default(),
         Duration::from_secs(45),
         |line, complete| {
@@ -474,6 +536,7 @@ struct Output {
     success: bool,
     bytes: Option<u64>,
     failure: Option<FailureKind>,
+    session_expired: bool,
 }
 
 fn download(
@@ -487,15 +550,25 @@ fn download(
     let mut sandbox_error = false;
     let mut last_prompt = None;
     let mut started = false;
+    let signing_in = request.account.is_some() || request.qr;
+    control.hide_output(signing_in);
     let status = process::run(
         command,
+        format!("{} · {}", backend.name(), request.item.title),
         control,
         Duration::from_secs(600),
         |line, complete| {
+            if request.qr && complete {
+                if line.trim() == "Use the Steam Mobile App to sign in with this QR code:" {
+                    control.set_prompt(Some(PromptKind::Qr));
+                } else {
+                    control.add_qr_line(line);
+                }
+            }
             let line = line.trim();
             sandbox_error |= sandbox_failed(line);
             let lower = line.to_ascii_lowercase();
-            if request.account.is_some() {
+            if signing_in {
                 let prompt = authentication_prompt(&lower);
                 if prompt.is_some()
                     && (last_prompt != prompt || complete && control.prompt().is_none())
@@ -521,6 +594,7 @@ fn download(
             };
             if begin && !started {
                 started = true;
+                control.hide_output(false);
                 control.set_prompt(None);
                 report(Event::Downloading);
                 report(Event::Note(
@@ -528,6 +602,7 @@ fn download(
                 ));
             }
 
+            output.session_expired |= lower.contains("access token was rejected");
             if let Some(kind) = classify(&lower)
                 && output
                     .failure
@@ -568,6 +643,9 @@ fn download(
     }
     let kind = output.failure.unwrap_or(FailureKind::Process);
     let explanation = match kind {
+        FailureKind::Authentication if output.session_expired => {
+            "The saved Steam session expired. Retry to sign in again."
+        }
         FailureKind::Authentication => {
             "Steam sign-in is required or was rejected. Retry with an authorized Steam account."
         }
@@ -579,6 +657,9 @@ fn download(
             "Steam could not be reached or the download connection failed. You can retry."
         }
         FailureKind::Unsupported => "The backend does not support this Workshop operation.",
+        FailureKind::Files => {
+            "Check write permissions and free space for the download and application data folders."
+        }
         _ => {
             "The backend did not confirm a successful Workshop download. If this item requires sign-in, retry with an authorized Steam account."
         }
@@ -615,18 +696,26 @@ fn authentication_prompt(line: &str) -> Option<PromptKind> {
         || line.contains("confirm the login")
         || line.contains("approve the login")
         || line.contains("waiting for mobile confirmation")
+        || line.contains("waiting for confirmation")
+        || line.contains("confirm the authentication")
+        || line.contains("accept the login")
     {
         Some(PromptKind::Mobile)
     } else if line.ends_with(':')
         && (line.contains("auth code")
+            || line.contains("authentication code")
             || line.contains("steam guard code")
-            || line.contains("two-factor"))
+            || line.contains("two-factor")
+            || line.contains("two factor")
+            || line.contains("2 factor"))
     {
         Some(PromptKind::GuardCode)
     } else if line.ends_with(':')
         && (line == "password:"
             || line.contains("enter password")
-            || line.contains("enter your password"))
+            || line.contains("enter your password")
+            || line.contains("enter account password")
+            || line.contains("password for "))
     {
         Some(PromptKind::Password)
     } else {
@@ -666,6 +755,11 @@ fn classify(line: &str) -> Option<FailureKind> {
         "logon failed",
         "accessdenied",
         "not authenticated",
+        "failed to authenticate",
+        "requires authentication",
+        "authentication required",
+        "access token was rejected",
+        "invalid login auth code",
     ]
     .iter()
     .any(|text| line.contains(text))
@@ -681,6 +775,18 @@ fn classify(line: &str) -> Option<FailureKind> {
     .any(|text| line.contains(text))
     {
         Some(FailureKind::InvalidItem)
+    } else if [
+        "no space left",
+        "disk full",
+        "not enough space",
+        "read-only file system",
+        "permission denied",
+        "access is denied",
+    ]
+    .iter()
+    .any(|text| line.contains(text))
+    {
+        Some(FailureKind::Files)
     } else if [
         "no connection",
         "timed out",
@@ -771,12 +877,27 @@ mod tests {
         settings.steamcmd_path = Some(temp.path().join("missing").to_string_lossy().into_owned());
         settings.depot_downloader_path = Some(file.to_string_lossy().into_owned());
         assert_eq!(
-            eligible(&PROVIDERS, &settings, BackendChoice::Automatic, true)[0]
-                .provider
-                .id(),
+            eligible(
+                &PROVIDERS,
+                &settings,
+                BackendChoice::Automatic,
+                true,
+                temp.path()
+            )[0]
+            .provider
+            .id(),
             BackendChoice::DepotDownloader
         );
-        assert!(eligible(&PROVIDERS, &settings, BackendChoice::SteamCmd, false).is_empty());
+        assert!(
+            eligible(
+                &PROVIDERS,
+                &settings,
+                BackendChoice::SteamCmd,
+                false,
+                temp.path()
+            )
+            .is_empty()
+        );
         assert!(FailureKind::Unsupported.can_fallback());
         assert!(!FailureKind::Ownership.can_fallback());
     }

@@ -77,12 +77,16 @@ pub struct ScanReport {
 pub fn discover(root: &Path) -> Result<(Vec<Candidate>, Vec<String>)> {
     // This also rejects symlink/reparse ancestors before traversing a user root.
     files::ensure_directory(root, false)?;
-    let mut pending = vec![(root.to_owned(), 0)];
-    let mut candidates = Vec::new();
     let mut warnings = Vec::new();
+    let mut pending = scan_roots(root, &mut warnings)
+        .into_iter()
+        .map(|path| (path, 0))
+        .collect::<Vec<_>>();
+    let mut candidates = Vec::new();
+    let mut directories = HashSet::new();
     let mut visited = 0;
     while let Some((directory, depth)) = pending.pop() {
-        if depth > 8 {
+        if depth > 8 || !directories.insert(directory.clone()) {
             continue;
         }
         visited += 1;
@@ -186,6 +190,60 @@ pub fn discover(root: &Path) -> Result<(Vec<Candidate>, Vec<String>)> {
     }
     Ok((candidates, warnings))
 }
+fn scan_roots(root: &Path, warnings: &mut Vec<String>) -> Vec<PathBuf> {
+    let steamapps = if root.file_name().is_some_and(|name| name == "steamapps") {
+        root.to_owned()
+    } else {
+        root.join("steamapps")
+    };
+    if files::ensure_directory(&steamapps, false).is_err() {
+        return vec![root.to_owned()];
+    }
+
+    let mut workshops = vec![steamapps.join("workshop")];
+    let manifest = steamapps.join("libraryfolders.vdf");
+    if manifest.exists() {
+        match read_text(&manifest).and_then(|text| library_workshops(&text)) {
+            Ok(paths) => workshops.extend(paths),
+            Err(error) => warnings.push(format!("Could not read Steam library folders. {error}")),
+        }
+    }
+    workshops.retain(|path| {
+        if !path.exists() {
+            return false;
+        }
+        if let Err(error) = files::ensure_directory(path, false) {
+            warnings.push(error.to_string());
+            return false;
+        }
+        true
+    });
+    workshops
+}
+
+fn library_workshops(text: &str) -> Result<Vec<PathBuf>> {
+    let root = keyvalues(text.trim_start_matches('\u{feff}'))?;
+    let entries = root
+        .object("libraryfolders")
+        .or_else(|_| root.object("LibraryFolders"))?;
+    Ok(entries
+        .iter()
+        .filter(|(key, _)| key.parse::<u32>().is_ok())
+        .take(128)
+        .filter_map(|(_, value)| {
+            let path = Path::new(match value {
+                Value::Object(fields) => fields.text("path").ok()?,
+                Value::Text(path) => path,
+            });
+            (path.is_absolute()
+                && !path
+                    .components()
+                    .any(|part| part == std::path::Component::ParentDir))
+            .then(|| path.join("steamapps").join("workshop"))
+        })
+        .collect())
+}
+
 fn read_text(path: &Path) -> Result<String> {
     let metadata = fs::symlink_metadata(path)?;
     if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 4 * 1024 * 1024
@@ -373,6 +431,29 @@ fn keyvalues(text: &str) -> Result<BTreeMap<String, Value>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn discovers_workshop_roots_from_steam_library_manifest() {
+        let root = tempfile::tempdir().unwrap();
+        let steam = root.path().join("Steam");
+        let extra = root.path().join("Other Steam Library");
+        let main_workshop = steam.join("steamapps/workshop");
+        let extra_workshop = extra.join("steamapps/workshop");
+        fs::create_dir_all(&main_workshop).unwrap();
+        fs::create_dir_all(&extra_workshop).unwrap();
+        let escaped = extra.to_str().unwrap().replace('\\', "\\\\");
+        fs::write(
+            steam.join("steamapps/libraryfolders.vdf"),
+            format!(
+                r#""libraryfolders" {{ "0" {{ "path" "{escaped}" "apps" {{}} }} "1" "relative" }}"#
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            scan_roots(&steam, &mut Vec::new()),
+            [main_workshop, extra_workshop]
+        );
+    }
+
     #[test]
     fn reads_steam_identity_from_acf_and_never_numeric_folder_names_alone() {
         let root = tempfile::tempdir().unwrap();

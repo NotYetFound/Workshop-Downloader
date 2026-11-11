@@ -450,3 +450,34 @@ input::placeholder { color: var(--faint); opacity: 1; }
 .sidebar-download-error [role="alert"] { font-size: 11px; overflow-wrap: anywhere; }
 .sidebar-download-error p { color: var(--muted); margin-top: 4px; }
 .sidebar-error-link { border: 0; padding: 0; margin-top: 7px; color: var(--accent); background: transparent; font-size: 11px; text-align: left; }
+
+.downloads-overview-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; }
+
+.download-auth-window { height: 100%; padding: 20px; overflow: auto; }
+.download-auth-window h1 { font-size: 17px; margin-bottom: 12px; }
+.download-auth-window .auth-strip { align-items: center; border: 0; background: transparent; padding: 0; }
+.download-auth-window .auth-strip > label { width: 100%; }
+.download-auth-window .auth-strip > input { flex: 1; max-width: none; }
+.download-auth-window .auth-strip > .error-text { width: 100%; }
+
+.backend-sign-in .switch:focus-visible { outline-offset: 3px; }
+.download-logs-window { height: 100%; display: flex; flex-direction: column; padding: 16px; gap: 12px; }
+.download-logs-window h1 { font-size: 17px; }
+.download-logs-window header p { margin-top: 4px; color: var(--muted); overflow-wrap: anywhere; }
+.live-download-log { flex: 1; min-height: 0; overflow: auto; border: 1px solid var(--line); border-radius: 9px; }
+.live-download-log > p { padding: 12px; color: var(--muted); }
+.live-download-log article { display: grid; grid-template-columns: 100px minmax(0, 1fr); gap: 8px; padding: 8px 12px; }
+.live-download-log article + article { border-top: 1px solid var(--line); }
+.live-download-log article p { color: var(--muted); overflow-wrap: anywhere; }
+.live-download-log time { color: var(--muted); font-variant-numeric: tabular-nums; }
+
+.debug-tabs { display: flex; gap: 6px; }
+.debug-tabs [aria-pressed="true"] { background: var(--selected); border-color: var(--accent); }
+.terminal-tabs { overflow-x: auto; flex: 0 0 auto; }
+.terminal-tabs button { max-width: 260px; overflow: hidden; text-overflow: ellipsis; display: block; }
+.terminal-output pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px ui-monospace, monospace; }
+
+.backend-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.update-notes { max-height: 180px; overflow: auto; white-space: pre-wrap; font: inherit; }
+.steam-qr { width: 100%; display: grid; justify-items: start; gap: 12px; }
+.steam-qr svg { width: min(224px, 100%); height: auto; }

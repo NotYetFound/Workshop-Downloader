@@ -13,7 +13,7 @@ use std::{
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use serde::Serialize;
 use ts_rs::TS;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use super::{FailureKind, ProviderError};
 
@@ -23,6 +23,8 @@ pub enum PromptKind {
     Password,
     GuardCode,
     Mobile,
+    Account,
+    Qr,
 }
 
 #[derive(Clone, Debug, Serialize, TS)]
@@ -30,17 +32,20 @@ pub enum PromptKind {
 pub struct AuthPrompt {
     pub job_id: String,
     pub kind: PromptKind,
+    pub qr: Option<String>,
 }
 
 #[derive(Default)]
 struct Authentication {
     prompt: Option<PromptKind>,
     response: Option<Zeroizing<String>>,
+    qr_lines: Zeroizing<Vec<String>>,
 }
 
 #[derive(Default)]
 pub(super) struct Control {
     cancel: AtomicBool,
+    hide_output: AtomicBool,
     auth: Mutex<Authentication>,
 }
 
@@ -60,6 +65,7 @@ impl Control {
     pub fn set_prompt(&self, kind: Option<PromptKind>) {
         if let Ok(mut auth) = self.auth.lock() {
             auth.prompt = kind;
+            auth.qr_lines.zeroize();
         }
     }
 
@@ -71,6 +77,12 @@ impl Control {
             return false;
         };
         let valid = match auth.prompt {
+            Some(PromptKind::Account) => {
+                (1..=64).contains(&response.len())
+                    && response
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+            }
             Some(PromptKind::Password) => {
                 !response.is_empty()
                     && response.len() <= 1024
@@ -88,6 +100,58 @@ impl Control {
             return true;
         }
         false
+    }
+
+    pub(super) fn hide_output(&self, hidden: bool) {
+        self.hide_output.store(hidden, Ordering::Release);
+    }
+
+    pub(super) fn add_qr_line(&self, line: &str) {
+        // DepotDownloader prints two identical characters for each QR module.
+        let mut cells = line.chars();
+        let mut row = String::new();
+        while let Some(first) = cells.next() {
+            if cells.next() != Some(first) || !matches!(first, ' ' | '█') {
+                return;
+            }
+            row.push(if first == '█' { '1' } else { '0' });
+        }
+        let size = row.len();
+        if (29..=81).contains(&size)
+            && (size - 29).is_multiple_of(4)
+            && let Ok(mut auth) = self.auth.lock()
+            && auth.prompt == Some(PromptKind::Qr)
+            && auth.qr_lines.len() < size
+            && auth
+                .qr_lines
+                .first()
+                .is_none_or(|first| first.len() == size)
+        {
+            auth.qr_lines.push(row);
+        }
+    }
+
+    pub(super) fn qr(&self) -> Option<String> {
+        let auth = self.auth.lock().ok()?;
+        let size = auth.qr_lines.first()?.len();
+        (auth.prompt == Some(PromptKind::Qr) && auth.qr_lines.len() == size)
+            .then(|| auth.qr_lines.join("\n"))
+    }
+
+    pub(super) fn wait_for_account(&self) -> std::result::Result<Zeroizing<String>, ProviderError> {
+        self.set_prompt(Some(PromptKind::Account));
+        let started = Instant::now();
+        while !self.cancelled() && started.elapsed() < Duration::from_secs(600) {
+            if let Some(response) = self.take_response() {
+                return Ok(response);
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        self.set_prompt(None);
+        Err(ProviderError::new(
+            FailureKind::Authentication,
+            "Steam sign-in was cancelled or timed out.",
+        ))
     }
 
     fn take_response(&self) -> Option<Zeroizing<String>> {
@@ -139,10 +203,14 @@ pub(super) fn private_workspace(
 
 pub(super) fn run(
     command: CommandBuilder,
+    title: String,
     control: &Control,
     idle_timeout: Duration,
     mut on_output: impl FnMut(&str, bool),
 ) -> std::result::Result<portable_pty::ExitStatus, ProviderError> {
+    let transcript = super::transcript::Transcript::start(title);
+    transcript.detail("Starting the backend process.");
+    let mut secrets: Vec<Zeroizing<String>> = Vec::new();
     let pair = native_pty_system()
         .openpty(PtySize {
             rows: 32,
@@ -218,13 +286,26 @@ pub(super) fn run(
                     "The backend closed its authentication prompt.",
                 ));
             }
+            secrets.push(response);
             last_activity = Instant::now();
         }
+
+        let mut publish = |line: &str, complete| {
+            let was_hidden = control.hide_output.load(Ordering::Acquire);
+            on_output(line, complete);
+            if complete && !was_hidden && !sensitive_output(line) {
+                let mut text = line.to_owned();
+                for secret in &secrets {
+                    text = text.replace(secret.as_str(), "[redacted]");
+                }
+                transcript.line(text);
+            }
+        };
 
         if !stream_closed {
             match receiver.recv_timeout(Duration::from_millis(100)) {
                 Ok(bytes) => {
-                    decoder.feed(&bytes, &mut on_output);
+                    decoder.feed(&bytes, &mut publish);
                     last_activity = Instant::now();
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => stream_closed = true,
@@ -252,7 +333,7 @@ pub(super) fn run(
             .as_ref()
             .is_some_and(|(_, time)| stream_closed || time.elapsed() >= Duration::from_secs(2))
         {
-            decoder.finish(&mut on_output);
+            decoder.finish(&mut publish);
             break Ok(exit.take().expect("exit was checked").0);
         }
         if last_activity.elapsed() >= idle_timeout {
@@ -268,12 +349,30 @@ pub(super) fn run(
         }
     };
     control.set_prompt(None);
+    transcript.detail("The backend process ended.");
     drop(receiver);
     drop(process);
     if output.is_finished() {
         let _ = output.join();
     }
     outcome
+}
+
+fn sensitive_output(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    [
+        "password",
+        "guard code",
+        "auth code",
+        "authentication code",
+        "token",
+        "logging '",
+        "qr code",
+        "s.team/q/",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+        || line.contains(['█', '▀', '▄'])
 }
 
 fn process_error(message: impl Into<String>) -> ProviderError {
@@ -417,5 +516,38 @@ impl Decoder {
             // Replace the buffer so zeroization includes terminal echoes.
             self.line = Zeroizing::new(Vec::new());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn collects_only_complete_depot_qr_challenges_and_clears_old_ones() {
+        let control = Control::default();
+        control.set_prompt(Some(PromptKind::Qr));
+        let blank = "  ".repeat(33);
+        let code = format!("{}{}{}", "  ".repeat(4), "██".repeat(25), "  ".repeat(4));
+        for index in 0..32 {
+            control.add_qr_line(if (4..29).contains(&index) {
+                &code
+            } else {
+                &blank
+            });
+        }
+        control.add_qr_line("Ignore unrelated terminal output");
+        assert!(control.qr().is_none());
+        control.add_qr_line(&blank);
+        let matrix = control.qr().unwrap();
+        assert_eq!(matrix.lines().count(), 33);
+        assert_eq!(
+            matrix.lines().nth(4).unwrap(),
+            format!("0000{}0000", "1".repeat(25))
+        );
+        control.set_prompt(Some(PromptKind::Qr));
+        assert!(control.qr().is_none());
+        assert!(sensitive_output(&code));
+        assert!(sensitive_output("Access token was rejected (Expired)."));
     }
 }

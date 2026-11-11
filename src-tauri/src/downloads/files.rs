@@ -309,7 +309,7 @@ fn scan_dir(
     Ok(())
 }
 
-fn valid_component(name: &str) -> bool {
+pub(super) fn valid_component(name: &str) -> bool {
     if name.is_empty()
         || name.ends_with([' ', '.'])
         || name

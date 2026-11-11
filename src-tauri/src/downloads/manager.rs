@@ -12,8 +12,8 @@ use ts_rs::TS;
 use zeroize::Zeroizing;
 
 use super::{
-    AuthPrompt, BackendInfo, DownloadJob, DownloadStatus, FailureKind, InstalledItem,
-    ProviderError, QueueOptions, files,
+    AuthPrompt, BackendChoice, BackendInfo, DownloadJob, DownloadStatus, FailureKind,
+    InstalledItem, ProviderError, QueueOptions, files,
     process::Control,
     providers::{self, DownloadProvider, DownloadRequest, Event},
     timestamp, valid_job_id,
@@ -41,6 +41,7 @@ pub struct DownloadManager {
     worker: Mutex<Option<JoinHandle<()>>>,
     _instance: File,
     cache: Mutex<ContentCache>,
+    backend_checks: Mutex<Vec<BackendInfo>>,
 }
 
 #[derive(Default)]
@@ -62,8 +63,9 @@ struct Shared {
 #[derive(Default)]
 struct Scheduler {
     active: Option<ActiveJob>,
-    accounts: HashMap<String, Zeroizing<String>>,
+    accounts: HashMap<String, Login>,
     stopping: bool,
+    maintenance: bool,
 }
 
 struct ActiveJob {
@@ -74,7 +76,32 @@ struct ActiveJob {
 struct Attempt {
     job: DownloadJob,
     control: Arc<Control>,
-    account: Option<Zeroizing<String>>,
+    login: Option<Login>,
+}
+
+#[derive(Clone)]
+enum Login {
+    Username(Zeroizing<String>),
+    Qr,
+}
+
+impl Login {
+    fn from_options(options: QueueOptions) -> Option<Self> {
+        if options.qr == Some(true) {
+            Some(Self::Qr)
+        } else {
+            options
+                .account
+                .map(|account| Self::Username(Zeroizing::new(account)))
+        }
+    }
+
+    fn account(&self) -> Option<&str> {
+        match self {
+            Self::Username(account) => Some(account.as_str()),
+            Self::Qr => None,
+        }
+    }
 }
 
 impl DownloadManager {
@@ -117,6 +144,7 @@ impl DownloadManager {
             worker: Mutex::new(Some(worker)),
             _instance: instance,
             cache: Mutex::new(ContentCache::default()),
+            backend_checks: Mutex::new(Vec::new()),
         })
     }
 
@@ -132,10 +160,8 @@ impl DownloadManager {
         job.destination =
             path_text(files::choose_destination(&settings, &job.item, previous, job.replace)?.0)?;
         self.shared.storage.put_job(&job)?;
-        if let Some(account) = options.account {
-            state
-                .accounts
-                .insert(job.id.clone(), Zeroizing::new(account));
+        if let Some(login) = Login::from_options(options) {
+            state.accounts.insert(job.id.clone(), login);
         }
         let _ = self
             .shared
@@ -150,9 +176,9 @@ impl DownloadManager {
         let mut state = self.shared.lock()?;
         let mut job = self.shared.require_job(id)?;
         let resume = job.status == DownloadStatus::Queued && job.account_required;
-        if resume && options.account.is_none() {
+        if resume && !options.requires_account() {
             return Err(AppError::Invalid(
-                "Enter a Steam account name to resume this job.".into(),
+                "Enable Steam sign-in to resume this job.".into(),
             ));
         }
         if !resume {
@@ -162,7 +188,7 @@ impl DownloadManager {
         job.requested_backend = options.backend;
         job.provider = options.backend.id().into();
         job.replace = options.replace;
-        job.account_required = options.account.is_some();
+        job.account_required = options.requires_account();
         job.percent = None;
         job.downloaded_bytes = None;
         job.bytes_per_second = None;
@@ -174,8 +200,8 @@ impl DownloadManager {
         } else {
             self.shared.storage.requeue_job(&job)?;
         }
-        if let Some(account) = options.account {
-            state.accounts.insert(id.into(), Zeroizing::new(account));
+        if let Some(login) = Login::from_options(options) {
+            state.accounts.insert(id.into(), login);
         }
         let _ = self.shared.storage.log(id, "Queued another attempt.");
         self.shared.wake.notify_one();
@@ -215,12 +241,23 @@ impl DownloadManager {
         self.shared.storage.remove_job(id)
     }
 
+    pub fn clear_history(&self) -> Result<()> {
+        let state = self.shared.lock()?;
+        if state.active.is_some() {
+            return Err(AppError::Invalid(
+                "Wait for the current download to finish before clearing history.".into(),
+            ));
+        }
+        self.shared.storage.clear_download_history()
+    }
+
     pub fn prompt(&self) -> Result<Option<AuthPrompt>> {
         let state = self.shared.lock()?;
         Ok(state.active.as_ref().and_then(|active| {
             Some(AuthPrompt {
                 job_id: active.id.clone(),
                 kind: active.control.prompt()?,
+                qr: active.control.qr(),
             })
         }))
     }
@@ -464,11 +501,9 @@ impl DownloadManager {
         }
         // Jobs and batch membership commit together before the one existing worker wakes.
         self.shared.storage.put_batch(&batch, &jobs)?;
-        if let Some(account) = options.account {
+        if let Some(login) = Login::from_options(options) {
             for job in &jobs {
-                scheduler
-                    .accounts
-                    .insert(job.id.clone(), Zeroizing::new(account.clone()));
+                scheduler.accounts.insert(job.id.clone(), login.clone());
             }
         }
         self.shared.wake.notify_one();
@@ -515,18 +550,80 @@ impl DownloadManager {
     }
 
     pub fn backend_info(&self, settings: &Settings, check: bool) -> Result<Vec<BackendInfo>> {
+        let tools = self.shared.root.join("tools");
         if !check {
-            return Ok(providers::inspect(settings, None));
+            let mut backends = providers::inspect(settings, &tools, None);
+            if let Ok(checks) = self.backend_checks.lock() {
+                for backend in &mut backends {
+                    if let Some(check) = checks.iter().find(|check| {
+                        check.backend == backend.backend && check.path == backend.path
+                    }) {
+                        backend.version.clone_from(&check.version);
+                        backend.state = check.state;
+                        backend.message.clone_from(&check.message);
+                    }
+                }
+            }
+            return Ok(backends);
         }
+        let _maintenance = self.reserve_maintenance()?;
         let workspace = self
             .shared
             .root
             .join("checks")
             .join(uuid::Uuid::new_v4().to_string());
         files::ensure_directory(&workspace, true)?;
-        let result = providers::inspect(settings, Some(&workspace));
+        let result = providers::inspect(settings, &tools, Some(&workspace));
         let _ = fs::remove_dir_all(workspace);
+        if let Ok(mut checks) = self.backend_checks.lock() {
+            checks.clone_from(&result);
+        }
         Ok(result)
+    }
+
+    pub(crate) fn backend_release(&self, backend: BackendChoice) -> Result<super::BackendRelease> {
+        super::tools::check(&self.shared.root.join("tools"), backend)
+    }
+
+    pub(crate) fn install_backend(&self, backend: BackendChoice, source: &str) -> Result<()> {
+        let _maintenance = self.reserve_maintenance()?;
+        super::tools::install(&self.shared.root.join("tools"), backend, source)
+    }
+
+    pub(crate) fn restore_backend(&self, backend: BackendChoice) -> Result<()> {
+        let _maintenance = self.reserve_maintenance()?;
+        super::tools::restore(&self.shared.root.join("tools"), backend)
+    }
+
+    pub(crate) fn clear_backend_session(&self, backend: BackendChoice) -> Result<()> {
+        let _maintenance = self.reserve_maintenance()?;
+        if backend == BackendChoice::Automatic {
+            return Err(AppError::Invalid("Select a download engine.".into()));
+        }
+        if cfg!(windows) && backend == BackendChoice::DepotDownloader {
+            return Err(AppError::Invalid("DepotDownloader uses Windows .NET account storage. Use Steam’s account security controls to revoke its session.".into()));
+        }
+        let path = self.shared.root.join("runtimes").join(backend.id());
+        match fs::symlink_metadata(&path) {
+            Ok(_) => {
+                files::ensure_directory(&path, false)?;
+                fs::remove_dir_all(path)?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        Ok(())
+    }
+
+    pub(crate) fn reserve_maintenance(&self) -> Result<Maintenance<'_>> {
+        let mut state = self.shared.lock()?;
+        if state.active.is_some() || state.maintenance || state.stopping {
+            return Err(AppError::Invalid(
+                "Wait for the current download or setup operation to finish.".into(),
+            ));
+        }
+        state.maintenance = true;
+        Ok(Maintenance(&self.shared))
     }
 
     pub fn shutdown(&self) {
@@ -541,6 +638,17 @@ impl DownloadManager {
             && let Some(worker) = worker.take()
         {
             let _ = worker.join();
+        }
+    }
+}
+
+pub(crate) struct Maintenance<'a>(&'a Shared);
+
+impl Drop for Maintenance<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.0.state.lock() {
+            state.maintenance = false;
+            self.0.wake.notify_all();
         }
     }
 }
@@ -594,13 +702,14 @@ impl Shared {
             if state.stopping {
                 return Ok(None);
             }
-            if let Some(mut job) = self
-                .storage
-                .queued_jobs()?
-                .into_iter()
-                .find(|job| !job.account_required || state.accounts.contains_key(&job.id))
+            if !state.maintenance
+                && let Some(mut job) = self
+                    .storage
+                    .queued_jobs()?
+                    .into_iter()
+                    .find(|job| !job.account_required || state.accounts.contains_key(&job.id))
             {
-                let account = state.accounts.remove(&job.id);
+                let login = state.accounts.remove(&job.id);
                 job.transition(DownloadStatus::Preparing)?;
                 self.storage.put_job(&job)?;
                 let control = Arc::new(Control::default());
@@ -611,7 +720,7 @@ impl Shared {
                 return Ok(Some(Attempt {
                     job,
                     control,
-                    account,
+                    login,
                 }));
             }
             state = self
@@ -627,13 +736,9 @@ impl Shared {
                 Ok(Some(Attempt {
                     mut job,
                     control,
-                    account,
+                    login,
                 })) => {
-                    self.run_job(
-                        &mut job,
-                        &control,
-                        account.as_ref().map(|account| account.as_str()),
-                    );
+                    self.run_job(&mut job, &control, login.as_ref());
                     if let Ok(mut state) = self.lock() {
                         state.active = None;
                     }
@@ -647,7 +752,7 @@ impl Shared {
         }
     }
 
-    fn run_job(&self, job: &mut DownloadJob, control: &Control, account: Option<&str>) {
+    fn run_job(&self, job: &mut DownloadJob, control: &Control, login: Option<&Login>) {
         if !valid_job_id(&job.id)
             || job.item.app_id == 0
             || !job
@@ -667,7 +772,7 @@ impl Shared {
             return;
         }
         let stage = self.root.join("staging").join(&job.id);
-        let result = self.attempt(job, &stage, control, account);
+        let result = self.attempt(job, &stage, control, login);
         let result = match result {
             Ok((installation, bytes)) => self.finish(job, &installation, bytes),
             Err(error) if job.status == DownloadStatus::Finalizing => {
@@ -697,14 +802,15 @@ impl Shared {
         job: &mut DownloadJob,
         stage: &Path,
         control: &Control,
-        account: Option<&str>,
+        login: Option<&Login>,
     ) -> std::result::Result<(InstalledItem, u64), ProviderError> {
         let settings = self.storage.settings().map_err(from_files)?;
         let candidates = providers::eligible(
             &self.providers,
             &settings,
             job.requested_backend,
-            account.is_some(),
+            login.is_some(),
+            &self.root.join("tools"),
         );
         if candidates.is_empty() {
             return Err(ProviderError::new(
@@ -759,7 +865,7 @@ impl Shared {
             self.storage
                 .log(&job.id, &format!("Starting {}.", backend.name()))
                 .map_err(from_files)?;
-            job.transition(if account.is_some() {
+            job.transition(if login.is_some() {
                 DownloadStatus::Authenticating
             } else {
                 DownloadStatus::Downloading
@@ -771,23 +877,60 @@ impl Shared {
                 item: &item,
                 stage,
                 runtime: &runtime,
-                account,
+                account: login.and_then(Login::account),
+                qr: matches!(login, Some(Login::Qr)),
             };
             let mut event_error = None;
             let mut last_progress = Instant::now();
-            let result = candidate.provider.download(
-                &candidate.executable,
-                &request,
-                control,
-                &mut |event| {
-                    if event_error.is_none() {
-                        event_error = self.record_event(job, event, &mut last_progress).err();
-                        if event_error.is_some() {
-                            control.cancel();
-                        }
+            let mut report = |event| {
+                if event_error.is_none() {
+                    event_error = self.record_event(job, event, &mut last_progress).err();
+                    if event_error.is_some() {
+                        control.cancel();
                     }
-                },
-            );
+                }
+            };
+            let mut result =
+                candidate
+                    .provider
+                    .download(&candidate.executable, &request, control, &mut report);
+            if login.is_none()
+                && !control.cancelled()
+                && result
+                    .as_ref()
+                    .is_err_and(|error| error.kind == FailureKind::Authentication)
+            {
+                job.transition(DownloadStatus::Authenticating)
+                    .map_err(from_files)?;
+                self.storage.put_job(job).map_err(from_files)?;
+                self.storage
+                    .log(&job.id, "The backend requires Steam sign-in.")
+                    .map_err(from_files)?;
+                let account = control.wait_for_account()?;
+                fs::remove_dir_all(stage).map_err(|error| from_files(error.into()))?;
+                files::create_private_directory(stage).map_err(|error| from_files(error.into()))?;
+                let request = DownloadRequest {
+                    account: Some(account.as_str()),
+                    ..request
+                };
+                result = candidate.provider.download(
+                    &candidate.executable,
+                    &request,
+                    control,
+                    &mut |event| {
+                        if event_error.is_none() {
+                            event_error = self.record_event(job, event, &mut last_progress).err();
+                            if event_error.is_some() {
+                                control.cancel();
+                            }
+                        }
+                    },
+                );
+                if let Err(error) = result {
+                    // Keep authentication and ownership restrictions on the engine that reported them.
+                    return Err(error);
+                }
+            }
             if let Some(error) = event_error {
                 return Err(from_files(error));
             }
@@ -1214,19 +1357,29 @@ mod tests {
             control: &Control,
             report: &mut dyn FnMut(Event),
         ) -> std::result::Result<providers::Payload, ProviderError> {
+            if request.item.id == "104" && request.account.is_none() {
+                return Err(ProviderError::new(
+                    FailureKind::Authentication,
+                    "Sign-in required.",
+                ));
+            }
             let mut command = portable_pty::CommandBuilder::new(executable);
             command.cwd(request.stage);
             let script = match request.item.id.as_str() {
                 "101" => "printf 'Network failure\\n'; exit 7",
                 "102" => "sleep 45 & echo $! > child.pid; wait",
-                "103" => {
+                "103" | "104" => {
                     "printf 'password: '; read -r secret; test \"$secret\" = 'temporary-test-password' || exit 8; printf '\\nSteam Guard code: '; read -r guard; test \"$guard\" = 'TST42' || exit 9; printf '\\nreceived\\n'; mkdir content; printf mod > content/mod.txt"
                 }
                 _ => "mkdir content; printf mod > content/mod.txt",
             };
             command.args(["-c", script]);
-            let status =
-                super::super::process::run(command, control, Duration::from_secs(8), |line, _| {
+            let status = super::super::process::run(
+                command,
+                "Test engine".into(),
+                control,
+                Duration::from_secs(8),
+                |line, _| {
                     if line.trim() == "password:" {
                         control.set_prompt(Some(super::super::PromptKind::Password));
                     } else if line.trim() == "Steam Guard code:" {
@@ -1234,7 +1387,8 @@ mod tests {
                     } else if line == "received" {
                         report(Event::Downloading);
                     }
-                })?;
+                },
+            )?;
             if !status.success() {
                 return Err(ProviderError::new(
                     FailureKind::Network,
@@ -1247,6 +1401,39 @@ mod tests {
                 reported_bytes: Some(3),
             })
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn anonymous_authentication_failure_holds_and_resumes_the_same_job() {
+        let (root, storage, _) = fixture();
+        let manager = DownloadManager::with_providers(
+            storage.clone(),
+            root.path().join("engine"),
+            vec![&MockCli],
+        )
+        .unwrap();
+        let options = QueueOptions::default();
+        let queued = manager.enqueue(job("104", &options), options).unwrap();
+        use super::super::PromptKind;
+        for (kind, value) in [
+            (PromptKind::Account, "account"),
+            (PromptKind::Password, "temporary-test-password"),
+            (PromptKind::GuardCode, "TST42"),
+        ] {
+            wait_for(|| {
+                manager
+                    .prompt()
+                    .unwrap()
+                    .is_some_and(|prompt| prompt.kind == kind)
+            });
+            manager
+                .authenticate(&queued.id, Zeroizing::new(value.into()))
+                .unwrap();
+        }
+        wait_for(|| storage.job(&queued.id).unwrap().unwrap().status == DownloadStatus::Completed);
+        assert_eq!(storage.jobs().unwrap().len(), 1);
+        assert_eq!(storage.installed().unwrap().len(), 1);
     }
 
     #[cfg(unix)]

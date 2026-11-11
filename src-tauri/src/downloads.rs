@@ -4,6 +4,9 @@ mod process;
 mod providers;
 #[cfg(target_os = "linux")]
 pub mod sandbox;
+mod tools;
+pub(crate) mod transcript;
+pub use tools::BackendRelease;
 
 use serde::{Deserialize, Serialize};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
@@ -148,7 +151,7 @@ impl DownloadJob {
             expected_bytes: None,
             bytes_per_second: None,
             replace: options.replace,
-            account_required: options.account.is_some(),
+            account_required: options.requires_account(),
             previous_install: None,
         }
     }
@@ -183,10 +186,23 @@ pub struct QueueOptions {
     pub backend: BackendChoice,
     pub replace: bool,
     pub account: Option<String>,
+    #[ts(optional)]
+    pub qr: Option<bool>,
 }
 
 impl QueueOptions {
+    fn requires_account(&self) -> bool {
+        self.account.is_some() || self.qr == Some(true)
+    }
+
     fn validate(&self) -> Result<()> {
+        if self.qr == Some(true)
+            && (self.backend != BackendChoice::DepotDownloader || self.account.is_some())
+        {
+            return Err(AppError::Invalid(
+                "QR sign-in requires DepotDownloader and no account name.".into(),
+            ));
+        }
         if let Some(account) = &self.account
             && (account.is_empty()
                 || account.len() > 64
@@ -213,6 +229,13 @@ pub struct InstalledItem {
 
 #[derive(Clone, Debug, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
+pub struct DownloadActivity {
+    pub time: String,
+    pub title: String,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Serialize, TS)]
 pub struct DownloadLog {
     pub time: String,
     pub message: String,

@@ -3,4 +3,4 @@ import type { BackendChoice } from "./BackendChoice";
 import type { FolderNaming } from "./FolderNaming";
 import type { GamePreference } from "./GamePreference";
 
-export type Settings = { downloadDir: string, organizeByGame: boolean, folderNaming: FolderNaming, games: Array<GamePreference>, backend: BackendChoice, signIn: boolean, steamAccount: string, steamcmdPath: string | null, depotDownloaderPath: string | null, };
+export type Settings = { downloadDir: string, organizeByGame: boolean, folderNaming: FolderNaming, games: Array<GamePreference>, backend: BackendChoice, signIn: boolean, depotQr: boolean, setupComplete: boolean, verboseDiagnostics: boolean, steamAccount: string, steamcmdPath: string | null, depotDownloaderPath: string | null, };

@@ -1,44 +1,45 @@
 # Workshop Downloader
 
-Workshop Downloader browses Steam Workshop in a native desktop webview and downloads individual items, selections, and collections through SteamCMD or DepotDownloader.
+<img src="src-tauri/icons/icon.png" width="80" height="80" alt="Workshop Downloader blue parcel icon">
+
+Workshop Downloader is a desktop Steam Workshop browser and downloader for individual items, selections, and collections. It uses a native webview for Steam and writes downloaded files to folders you choose. Installation and activation of mods are handled by the game or your mod manager.
 
 ![Workshop Downloader browsing RimWorld mods with search filters and download controls](docs/screenshot.png)
 
-## Build and run
+## Install
 
-Use stable Rust and Node.js 22.12 or later in a supported release line. On Nobara and Fedora, install the [Tauri system prerequisites](https://v2.tauri.app/start/prerequisites/#linux). Linux downloads require [Landlock](https://docs.kernel.org/userspace-api/landlock.html) with ABI 3 or later enabled. On Windows, install [Visual Studio Build Tools with Desktop development with C++ and WebView2](https://v2.tauri.app/start/prerequisites/#windows). Interactive downloaders on Windows use ConPTY, available in Windows 10 version 1809 and later.
+Get the latest build from [GitHub Releases](https://github.com/NotYetFound/Workshop-Downloader/releases). Compare its SHA-256 digest with `SHA256SUMS.txt` on the release page.
 
-```sh
-npm ci
-npm run tauri dev
-```
+| Platform | Package | Installation |
+| --- | --- | --- |
+| Windows 10 (1809+) and Windows 11, x86-64 | `*-setup.exe` | Run the per-user installer. It can download the WebView2 runtime if needed. |
+| Linux, x86-64 | `.AppImage` | Mark it executable in your file manager or with `chmod +x <file>.AppImage`, then open it. |
+| Fedora and Nobara, x86-64 | `.rpm` | Run `sudo dnf install ./<file>.rpm`, then open Workshop Downloader from the app menu. |
 
-```sh
-npm run check
-cargo test --locked --manifest-path src-tauri/Cargo.toml
-npm run tauri build -- --no-bundle
-```
+Linux downloading requires [Landlock ABI 3 or later](https://docs.kernel.org/userspace-api/landlock.html). SteamCMD on x86-64 Linux can also require 32-bit system libraries. The AppImage includes GStreamer media plugins. Check the release notes for platform verification and known limitations.
 
-Both dependency sets have lockfiles. Rust tests regenerate the TypeScript contracts in `src/lib/contracts`.
+## First run and download engines
 
-## Set up a downloader
+1. Confirm the default download folder, `Downloads/SteamWorkshop`.
+2. Check for a working engine or select **Set up** to install one from its official source. One engine is enough. You can open the Workshop and finish setting up downloads later.
+3. Open **Preferences → Download engines** to select a manual executable, check versions, update a managed installation, or restore its previous version. Save preferences after changing paths or defaults.
 
-Workshop Downloader detects executables on the system PATH. On Linux it also looks for a SteamCMD installation under `~/.local/share/steamcmd`. Open **Preferences → Download engines** to select an executable, run the operational checks, or open the official setup pages. Save preferences after changing paths or the default backend.
+The official tools are [Valve SteamCMD](https://developer.valvesoftware.com/wiki/SteamCMD) and [SteamRE DepotDownloader](https://github.com/SteamRE/DepotDownloader/releases/latest). Managed setup downloads them separately. For a manual SteamCMD installation, choose the official `steamcmd.sh` next to its Linux binaries or `steamcmd.exe` on Windows. For DepotDownloader, choose its standalone executable for your OS. DepotDownloader is [GPL-2.0 licensed](https://github.com/SteamRE/DepotDownloader/blob/DepotDownloader_3.4.0/LICENSE).
 
-- For [Valve SteamCMD](https://developer.valvesoftware.com/wiki/SteamCMD), extract the official distribution to its own directory. Select `steamcmd.sh` next to its Linux binaries or `steamcmd.exe` on Windows. On Linux, use the actual launcher from the distribution when a package wrapper cannot be isolated. The app copies the required distribution files into its own runtime and uses a separate home and install directory.
-- For [SteamRE DepotDownloader](https://github.com/SteamRE/DepotDownloader/releases/latest), extract the official release for your OS and select the standalone executable. The app uses its documented published-file, directory, and verification options. Each job runs in its own working directory.
-- **Automatic** prefers an eligible SteamCMD installation, then DepotDownloader. An unavailable executable or unsupported operation can switch to the next eligible provider. Account, ownership, item, and network failures require an explicit retry.
+**Automatic** prefers an eligible SteamCMD installation, then DepotDownloader. An unavailable executable or unsupported operation can switch to the next eligible provider. Authentication holds the job on the selected engine. Ownership, item, and network errors appear in Downloads.
 
-Both tools are installed separately. The app opens their official sources and does not redistribute their binaries. DepotDownloader is [GPL-2.0 licensed](https://github.com/SteamRE/DepotDownloader/blob/master/LICENSE).
-
-## Download and manage items
+## Browse and download
 
 1. Open an individual item in **Browse** and left-click **Download…** in the app toolbar to queue it immediately using your saved default backend and sign-in preference.
 2. Right-click the same button for a native overlay menu. Toggle **Sign in with Steam** for that menu invocation if needed, then click an engine to queue one download immediately. The next left-click uses your saved defaults. Save your default backend, sign-in preference, and Steam account name in **Preferences → Download engines**. The sidebar shows the current mod, its Workshop size, its position in the batch, and the progress reported by the engine. Standalone downloads display **1/1**. The bar shows activity when a percentage is unavailable. Failures appear in a separate dismissible alert. Press Enter in the address bar to navigate; **Copy** copies the current page URL.
 3. Use **Downloads** to cancel an active or queued job, retry, open the folder, expand the log, or remove a terminal job from history. Removing history keeps installed files and their Downloaded badge.
 4. **Download again…** creates another copy. Explicit replacement remains available when retrying a replacement job; batches never replace existing folders.
 
-The login flow passes the account name as the backend’s documented argument. The trusted shell collects the password or Steam Guard code in Preferences only when the backend prompts and sends it to the backend’s private terminal. Mobile approval is shown when the backend requests it. Workshop Downloader does not write passwords or codes to SQLite, arguments, or its diagnostic logs. SteamCMD uses its own managed Steam home for any session data. An account-backed job still queued after restart waits for the account name through the resume action.
+### Steam sign-in
+
+Public items can download anonymously. When an engine asks for sign-in, a separate window guides you through the account name, password, Steam Guard code, or mobile approval that the engine requests. Enable **Use Steam mobile QR when signing in with DepotDownloader** in Preferences to scan a QR challenge when signing in with that engine. Authentication input goes to the private backend terminal. Debug and exported diagnostics exclude authentication data.
+
+Change the account name in Preferences to switch accounts. **Clear session** is available for SteamCMD and Linux DepotDownloader. Windows DepotDownloader uses the .NET account store, where Steam's account security controls can revoke the session. A signed-in job still queued after restart can be resumed with the appropriate sign-in settings.
 
 ## Collections, selections, and batches
 
@@ -52,7 +53,7 @@ Collection metadata uses [Valve’s GetCollectionDetails and GetPublishedFileDet
 
 ## Recognize existing content
 
-In **Preferences → Existing downloads**, choose a directory and scan. Steam/SteamCMD discovery reads `appworkshop_<appid>.acf` and its installed entries, then verifies the corresponding `content/<appid>/<publishedfileid>` tree. Choose the Workshop directory containing the ACF files, rather than a bare numeric mod folder. Workshop Downloader inventory files are also recognized when present in copied exports.
+In **Preferences → Existing downloads**, choose a directory and scan. Steam/SteamCMD discovery reads `appworkshop_<appid>.acf` and its installed entries, then verifies the corresponding `content/<appid>/<publishedfileid>` tree. Choose a Steam installation to scan Workshop folders listed in `libraryfolders.vdf`, or select the Workshop directory containing its ACF files. Workshop Downloader inventory files are also recognized when present in copied exports.
 
 For DepotDownloader output containing `.DepotDownloader/<appid>_<manifest>.manifest`, supply the matching Workshop item URL. Valve’s published-file metadata must match both the game and content manifest ID. A manifest alone cannot reliably identify a published-file ID, so the app does not infer one from the folder name. Known manifest byte sizes must match the captured payload. Unidentifiable, unsafe, missing, or incomplete content produces scan notes.
 
@@ -65,6 +66,12 @@ Preferences default to the operating system’s Downloads folder under `SteamWor
 The worker runs one job at a time in FIFO order among jobs ready to run. On Linux, Landlock restricts downloader writes to the job staging area and the provider’s private runtime. DepotDownloader also gets the narrow system .NET named-mutex directory required by its runtime. On Windows, CLI providers run with the user’s filesystem permissions and a Job Object for process-tree cancellation. Finalization validates and publishes files on both platforms. It requires a backend completion marker, a successful exit, and a nonempty tree matching the byte total when the CLI reports one. The staged files are copied to a private sibling directory, verified, and renamed into place without overwriting an occupied destination. Unsafe names, links, reparse points, and case-insensitive filename conflicts are rejected. A small inventory file inside each completed folder lets the app detect missing or changed-size files after restart.
 
 SQLite schema version 3 stores the queue, histories, bounded logs, current installations, collection metadata/membership, previews, batches and their job relationships, and separate external inventories. Migrations preserve version 1/2 settings and job records. Account passwords and Guard codes are never persisted. Current content states distinguish queued, downloading, downloaded, external, missing, failed, and not downloaded; file inventories are cached for five seconds, invalidated on imports and completion, and rebuilt after restart. An interrupted transfer can be retried. If publication finished before the app exited, recovery can verify the folder and commit its record. A previous folder is restored when a replacement was interrupted before publication. An occupied destination is left intact, and the old backup is kept if it cannot be restored safely.
+
+## Diagnostics and updates
+
+Open **Preferences → Application and diagnostics → Debug** for the live Terminal and Logs tabs. **Export diagnostics** saves app and OS versions, checked engine versions, and recent download status and error categories. The export excludes raw terminal output, paths, item IDs, and account identifiers.
+
+Signed Windows and AppImage builds can check GitHub Releases for app updates. Use the latest RPM for package-managed installs. Builds without an updater key link to GitHub Releases for manual updates.
 
 ## Browser and security
 
@@ -84,8 +91,25 @@ Steam gets no Tauri capability. The Steam page has no always-visible Workshop Do
 | `src-tauri/src/workshop/external.rs` | Read-only manifest discovery and external file inventories |
 | `src-tauri/src/injection/workshop.js` | Workshop item actions and dynamic badges |
 
-## Desktop smoke test
+## Build and test
 
-On Linux, open [Global Positions](https://steamcommunity.com/sharedfiles/filedetails/?id=378160973), queue it anonymously with an available provider, then inspect its files and the Downloads log. Verify the badge on the item and in search, and reopen the app to confirm the record persists. Use a temporary download root when testing replacement or removing files.
+Use stable Rust and Node.js 22.12+ or 24+. Install the [Tauri Linux prerequisites](https://v2.tauri.app/start/prerequisites/#linux) or [Windows C++ Build Tools and WebView2](https://v2.tauri.app/start/prerequisites/#windows).
 
-The development smoke tests ran both official providers through the embedded app on Nobara KDE Wayland. Milestone 3 resolved the public 21-item DST mod list collection, downloaded Global Positions and Health Info as one selected batch through DepotDownloader, verified the Global Positions payload against its reference, exercised browse selection and trusted previews, and recognized existing DepotDownloader content without duplicating its record on rescan. Restart checks preserved batch history and external records, detected a missing payload, and verified external fallback status on the item toolbar and browse cards. Unit tests cover parsing, cycles, unavailable and cross-game items, batch rollback/cancellation/retry, external manifests, copied inventories, and database migrations. The Windows GNU target passed compile checking. Authenticated terminal input and cancellation are covered by mocked-process tests. Live credentialed Steam sign-in and the Windows desktop runtime require hands-on verification. Milestone 3 adds collection and bulk previews, persistent batches, and read-only external discovery. Future work can add richer provider progress and packaging/signing; there is no mod installation, load order, subscription management, or background updating.
+```sh
+npm ci
+npm run tauri dev
+```
+
+```sh
+npm run build
+cargo fmt --manifest-path src-tauri/Cargo.toml --all --check
+cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+cargo test --locked --manifest-path src-tauri/Cargo.toml
+npm run tauri -- build --no-bundle -- --locked
+```
+
+Rust tests regenerate the TypeScript contracts in `src/lib/contracts`. See [release validation](docs/release-validation.md) for packaging, signing, and the desktop smoke checklist, and [release notes](docs/release-notes.md) for current limitations.
+
+## License
+
+[MIT](LICENSE).

@@ -18,6 +18,7 @@ use crate::{AppError, Result, steam};
 
 const STEAM_VIEW: &str = "steam-docked";
 const ENHANCEMENTS: &str = include_str!("injection/workshop.js");
+const GALLERY: &str = include_str!("injection/workshop_gallery.js");
 
 #[derive(Clone, Copy, Debug, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -205,10 +206,15 @@ impl Browser {
         let builder = WebviewBuilder::new(STEAM_VIEW, WebviewUrl::External(url))
             .data_directory(self.profile.clone())
             .initialization_script(ENHANCEMENTS)
+            .initialization_script(GALLERY)
             .on_navigation(move |url| {
                 if let Some(ids) = preview_request(url) {
                     store_preview_request(&navigation_app, ids);
                     return false;
+                }
+                #[cfg(target_os = "linux")]
+                if gtk_slot::is_youtube_embed(url) {
+                    return true;
                 }
                 steam::is_browser_url(url)
             })

@@ -7,8 +7,8 @@ use crate::{
     AppError, Result,
     browser::Browser,
     downloads::{
-        AuthPrompt, BackendChoice, BackendInfo, DownloadJob, DownloadLog, DownloadManager,
-        ItemDownloadState, QueueOptions, official_source,
+        AuthPrompt, BackendChoice, BackendInfo, BackendRelease, DownloadJob, DownloadLog,
+        DownloadManager, ItemDownloadState, QueueOptions, official_source,
     },
     on_ui_thread,
     settings::Settings,
@@ -89,6 +89,18 @@ pub(crate) fn remove_download(manager: State<'_, DownloadManager>, id: String) -
 }
 
 #[tauri::command]
+pub(crate) fn clear_download_history(manager: State<'_, DownloadManager>) -> Result<()> {
+    manager.clear_history()
+}
+
+#[tauri::command]
+pub(crate) fn download_activity(
+    storage: State<'_, Arc<Storage>>,
+) -> Result<Vec<crate::downloads::DownloadActivity>> {
+    storage.download_activity()
+}
+
+#[tauri::command]
 pub(crate) fn download_logs(
     storage: State<'_, Arc<Storage>>,
     id: String,
@@ -163,6 +175,47 @@ pub(crate) async fn download_backends(
 }
 
 #[tauri::command]
+pub(crate) async fn backend_release(
+    app: AppHandle,
+    backend: BackendChoice,
+) -> Result<BackendRelease> {
+    background(app, move |app| {
+        app.state::<DownloadManager>().backend_release(backend)
+    })
+    .await
+}
+
+#[tauri::command]
+pub(crate) async fn install_backend(
+    app: AppHandle,
+    backend: BackendChoice,
+    source: String,
+) -> Result<()> {
+    background(app, move |app| {
+        app.state::<DownloadManager>()
+            .install_backend(backend, &source)
+    })
+    .await
+}
+
+#[tauri::command]
+pub(crate) async fn restore_backend(app: AppHandle, backend: BackendChoice) -> Result<()> {
+    background(app, move |app| {
+        app.state::<DownloadManager>().restore_backend(backend)
+    })
+    .await
+}
+
+#[tauri::command]
+pub(crate) async fn clear_backend_session(app: AppHandle, backend: BackendChoice) -> Result<()> {
+    background(app, move |app| {
+        app.state::<DownloadManager>()
+            .clear_backend_session(backend)
+    })
+    .await
+}
+
+#[tauri::command]
 pub(crate) fn open_backend_source(backend: BackendChoice) -> Result<()> {
     let url =
         official_source(backend).ok_or_else(|| AppError::Invalid("Select a backend.".into()))?;
@@ -208,4 +261,9 @@ pub(crate) fn open_target(target: &OsStr) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+#[tauri::command]
+pub(crate) fn terminal_sessions() -> Vec<crate::downloads::transcript::TerminalSession> {
+    crate::downloads::transcript::sessions()
 }

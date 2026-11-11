@@ -8,9 +8,10 @@
   import Panel from './Panel.svelte';
   import ExternalDownloads from './ExternalDownloads.svelte';
   import type { ItemDownloadState } from '../contracts/ItemDownloadState';
+  import ApplicationMaintenance from './ApplicationMaintenance.svelte';
   import DownloadBackends from './DownloadBackends.svelte';
 
-  let { settings, onSaved, states, onImported }: { settings: Settings; onSaved: (value: Settings) => void; states: Record<string, ItemDownloadState>; onImported: () => void } = $props();
+  let { settings, onSaved, states, onImported, setup, onSetup, onCloseSetup }: { settings: Settings; onSaved: (value: Settings) => void; states: Record<string, ItemDownloadState>; onImported: () => void; setup: boolean; onSetup: () => void; onCloseSetup: () => void } = $props();
 
   function copy(value: Settings): Settings {
     return { ...value, games: value.games.map((game) => ({ ...game })) };
@@ -65,8 +66,10 @@
     failure = '';
     message = '';
     const next = copy(draft);
+    if (setup) next.setupComplete = true;
     try {
       await desktop.saveSettings(next);
+      draft = copy(next);
       onSaved(next);
       message = 'Preferences saved.';
     } catch (error) {
@@ -90,6 +93,7 @@
     </label>
   </Panel>
 
+  {#if !setup}
   <Panel className="settings-primary settings-naming" title="Folder names">
     <fieldset class="naming-options" aria-label="Mod folder naming">
       {#each namingOptions as option (option.value)}
@@ -134,11 +138,18 @@
     <p class="field-note">An override is the game’s root. Leave it blank to use the default.</p>
   </Panel>
 
-  <DownloadBackends bind:settings={draft} disabled={saving} />
+  {/if}
 
-  <ExternalDownloads {states} {onImported} />
+  {#key setup}
+    <DownloadBackends bind:settings={draft} disabled={saving} {setup} />
+  {/key}
 
-  {#if dirty || saving || failure || message}
+  {#if !setup}
+    <ExternalDownloads {states} {onImported} />
+    <ApplicationMaintenance bind:verbose={draft.verboseDiagnostics} disabled={saving || dirty} {onSetup} />
+  {/if}
+
+  {#if setup || dirty || saving || failure || message}
   <div class="settings-actions">
     <div aria-live="polite">
       {#if failure}<span class="error-text" role="alert">{failure}</span>
@@ -146,12 +157,16 @@
       {:else if message}<span class="success-text">{message}</span>
       {/if}
     </div>
+    {#if setup && settings.setupComplete}
+      <button class="button secondary" type="button" disabled={saving} onclick={onCloseSetup}>Back to preferences</button>
+    {:else if !setup}
     <button class="button secondary" type="button" disabled={!dirty || saving} onclick={() => {
       draft = copy(settings);
       failure = '';
       message = '';
     }}>Discard</button>
-    <button class="button primary" type="button" disabled={!dirty || saving || choosing} onclick={save}>{saving ? 'Saving…' : 'Save preferences'}</button>
+    {/if}
+    <button class="button primary" type="button" disabled={(!setup && !dirty) || saving || choosing} onclick={save}>{saving ? 'Saving…' : setup ? 'Open Workshop' : 'Save preferences'}</button>
   </div>
   {/if}
 </div>

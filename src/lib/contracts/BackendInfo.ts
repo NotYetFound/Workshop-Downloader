@@ -2,4 +2,4 @@
 import type { BackendChoice } from "./BackendChoice";
 import type { BackendState } from "./BackendState";
 
-export type BackendInfo = { backend: BackendChoice, path: string | null, version: string | null, state: BackendState, message: string | null, };
+export type BackendInfo = { backend: BackendChoice, path: string | null, version: string | null, managed: boolean, canRestore: boolean, state: BackendState, message: string | null, };

@@ -1,7 +1,37 @@
 // Remote content gets only status labels. Navigation requests open a trusted
 // preview; no filesystem, process, path or authentication API is exposed here.
 (() => {
-  if (window.top !== window || location.origin !== 'https://steamcommunity.com') return;
+  if (window.top !== window || ![
+    'https://steamcommunity.com', 'https://login.steampowered.com', 'https://store.steampowered.com',
+  ].includes(location.origin)) return;
+
+  // Cover both Steam's classic header and the current header without depending
+  // on generated class names. Remove the fixed header's reserved mobile space.
+  const headerStyle = document.createElement('style');
+  headerStyle.textContent = `
+    #global_header,
+    .responsive_header,
+    header:has(a[href="https://store.steampowered.com/"]):has(nav a[href^="https://help.steampowered.com/"]) {
+      display: none !important;
+    }
+    .responsive_page_frame.with_header .responsive_page_content {
+      padding-top: 0 !important;
+    }
+  `;
+  function installHeaderStyle() {
+    const root = document.head ?? document.documentElement;
+    if (!root) return false;
+    root.append(headerStyle);
+    return true;
+  }
+  if (!installHeaderStyle()) {
+    const observer = new MutationObserver(() => {
+      if (installHeaderStyle()) observer.disconnect();
+    });
+    observer.observe(document, { childList: true, subtree: true });
+  }
+
+  if (location.origin !== 'https://steamcommunity.com') return;
   const badgeAttribute = 'data-workshop-desk-badge';
   const selected = new Set();
   let statuses = new Map();

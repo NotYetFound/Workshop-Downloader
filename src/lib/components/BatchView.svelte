@@ -1,7 +1,7 @@
 <script lang="ts">
   import { ChevronDown, Layers3 } from '@lucide/svelte';
   import DownloadsView from './DownloadsView.svelte';
-  import { desktop, errorMessage } from '../desktop';
+  import { desktop, downloadOptions, errorMessage } from '../desktop';
   import type { BatchProgress } from '../contracts/BatchProgress';
   import type { DownloadJob } from '../contracts/DownloadJob';
   import type { Settings } from '../contracts/Settings';
@@ -15,7 +15,7 @@
   async function action(id: string, retry: boolean) {
     busy = id; error = '';
     try {
-      if (retry) await desktop.retryBatch(id, { backend: settings.backend, account: settings.signIn ? settings.steamAccount : null, replace: false });
+      if (retry) await desktop.retryBatch(id, downloadOptions(settings, settings.backend, settings.signIn));
       else await desktop.cancelBatch(id);
       await onChanged();
     } catch (failure) { error = errorMessage(failure); } finally { busy = ''; }

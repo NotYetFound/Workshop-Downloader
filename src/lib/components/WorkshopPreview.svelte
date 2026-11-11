@@ -1,6 +1,6 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  import { backendNames, contentLabels } from '../desktop';
+  import { downloadOptions, signInAvailable, usesDepotQr, backendNames, contentLabels } from '../desktop';
   import type { WorkshopPreview } from '../contracts/WorkshopPreview';
   import type { Settings } from '../contracts/Settings';
   import type { QueueOptions } from '../contracts/QueueOptions';
@@ -43,10 +43,10 @@
     <div class="preview-actions preview-footer">
       <label>Engine <select bind:value={backend} disabled={busy}>{#each Object.entries(backendNames) as [id, name]}<option value={id}>{name}</option>{/each}</select></label>
       <label><input class="switch" type="checkbox" bind:checked={signIn} disabled={busy} /> Sign in with Steam</label>
-      {#if signIn}<span class="field-note">{settings.steamAccount || 'Set your Steam account name in Preferences first.'}</span>{/if}
+      {#if signIn}<span class="field-note">{usesDepotQr(settings, backend) ? 'Steam mobile app QR code' : settings.steamAccount || 'Set your Steam account name in Preferences first.'}</span>{/if}
       <button class="button" disabled={busy} onclick={onClose}>Cancel</button>
-      <button class="button primary" disabled={busy || !count || (signIn && !settings.steamAccount.trim())}
-        onclick={() => onQueue(selected.filter(eligible), { backend, account: signIn ? settings.steamAccount : null, replace: false }, redownload)}>
+      <button class="button primary" disabled={busy || !count || (signIn && !signInAvailable(settings, backend))}
+        onclick={() => onQueue(selected.filter(eligible), downloadOptions(settings, backend, signIn), redownload)}>
         {busy ? 'Queueing…' : `Download Selected (${count})`}
       </button>
     </div>

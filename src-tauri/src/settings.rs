@@ -37,6 +37,12 @@ pub struct Settings {
     #[serde(default)]
     pub sign_in: bool,
     #[serde(default)]
+    pub depot_qr: bool,
+    #[serde(default = "existing_setup_complete")]
+    pub setup_complete: bool,
+    #[serde(default)]
+    pub verbose_diagnostics: bool,
+    #[serde(default)]
     pub steam_account: String,
     #[serde(default)]
     pub steamcmd_path: Option<String>,
@@ -61,6 +67,9 @@ impl Settings {
             folder_naming: FolderNaming::Title,
             backend: BackendChoice::Automatic,
             sign_in: false,
+            depot_qr: false,
+            setup_complete: false,
+            verbose_diagnostics: false,
             steam_account: String::new(),
             steamcmd_path: None,
             depot_downloader_path: None,
@@ -95,7 +104,10 @@ impl Settings {
                 "Enter a valid Steam account name.".into(),
             ));
         }
-        if self.sign_in && self.steam_account.is_empty() {
+        if self.sign_in
+            && self.steam_account.is_empty()
+            && !(self.depot_qr && self.backend == BackendChoice::DepotDownloader)
+        {
             return Err(AppError::Invalid(
                 "Enter a Steam account name to enable sign-in.".into(),
             ));
@@ -133,6 +145,10 @@ impl Settings {
     pub fn game(&self, app_id: u32) -> Option<&GamePreference> {
         self.games.iter().find(|game| game.app_id == app_id)
     }
+}
+
+fn existing_setup_complete() -> bool {
+    true
 }
 
 fn validate_directory(value: &str) -> Result<()> {
@@ -183,6 +199,19 @@ mod tests {
         assert_eq!(settings.folder_naming, FolderNaming::Title);
         assert!(settings.organize_by_game);
         assert!(settings.validate().is_ok());
+    }
+
+    #[test]
+    fn only_new_profiles_start_in_setup() {
+        let fresh = Settings::new(test_root()).unwrap();
+        assert!(!fresh.setup_complete);
+        let mut existing = serde_json::to_value(&fresh).unwrap();
+        existing.as_object_mut().unwrap().remove("setupComplete");
+        assert!(
+            serde_json::from_value::<Settings>(existing)
+                .unwrap()
+                .setup_complete
+        );
     }
 
     #[test]

@@ -1,7 +1,9 @@
+mod aux_windows;
 mod browser;
 mod destination;
 mod download_commands;
 pub mod downloads;
+mod maintenance;
 mod settings;
 pub mod steam;
 pub mod storage;
@@ -70,7 +72,9 @@ fn get_settings(storage: State<'_, Arc<Storage>>) -> Result<Settings> {
 
 #[tauri::command]
 fn save_settings(storage: State<'_, Arc<Storage>>, settings: Settings) -> Result<()> {
-    storage.save_settings(&settings)
+    storage.save_settings(&settings)?;
+    downloads::transcript::set_verbose(settings.verbose_diagnostics);
+    Ok(())
 }
 
 #[tauri::command]
@@ -164,6 +168,8 @@ async fn inspect_item(
 pub fn run() -> tauri::Result<()> {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .manage(maintenance::PendingUpdate::default())
         .plugin(tauri_plugin_clipboard_manager::init())
         .invoke_handler(tauri::generate_handler![
             get_settings,
@@ -190,7 +196,12 @@ pub fn run() -> tauri::Result<()> {
             download_commands::retry_download,
             download_commands::cancel_download,
             download_commands::remove_download,
+            download_commands::clear_download_history,
             download_commands::download_logs,
+            download_commands::download_activity,
+            download_commands::terminal_sessions,
+            aux_windows::open_download_logs_window,
+            aux_windows::sync_download_auth_window,
             download_commands::download_prompt,
             download_commands::authenticate_download,
             download_commands::item_download_state,
@@ -198,7 +209,25 @@ pub fn run() -> tauri::Result<()> {
             download_commands::open_download_folder,
             download_commands::download_backends,
             download_commands::open_backend_source,
+            download_commands::backend_release,
+            download_commands::install_backend,
+            download_commands::restore_backend,
+            download_commands::clear_backend_session,
+            maintenance::application_info,
+            maintenance::check_application_update,
+            maintenance::install_application_update,
+            maintenance::open_application_releases,
+            maintenance::export_diagnostics,
         ])
+        .on_window_event(|window, event| {
+            if window.label() == "main" && matches!(event, tauri::WindowEvent::Destroyed) {
+                for label in [aux_windows::AUTH_LABEL, aux_windows::LOGS_LABEL] {
+                    if let Some(aux) = window.app_handle().get_webview_window(label) {
+                        let _ = aux.destroy();
+                    }
+                }
+            }
+        })
         .setup(|app| {
             let root = app.path().app_local_data_dir()?;
             let profile = root.join("steam-profile");
@@ -215,6 +244,7 @@ pub fn run() -> tauri::Result<()> {
                 storage.clone(),
                 root.join("downloads-engine"),
             )?);
+            downloads::transcript::set_verbose(storage.settings()?.verbose_diagnostics);
             app.manage(storage);
             app.manage(SteamClient::new()?);
             app.manage(Browser::new(profile));
@@ -260,6 +290,8 @@ fn export_frontend_contracts() {
     DownloadJob::export_all(&config).unwrap();
     downloads::QueueOptions::export_all(&config).unwrap();
     downloads::DownloadLog::export_all(&config).unwrap();
+    downloads::DownloadActivity::export_all(&config).unwrap();
+    downloads::transcript::TerminalSession::export_all(&config).unwrap();
     downloads::AuthPrompt::export_all(&config).unwrap();
     downloads::ItemDownloadState::export_all(&config).unwrap();
     workshop::WorkshopPreview::export_all(&config).unwrap();
@@ -267,4 +299,7 @@ fn export_frontend_contracts() {
     workshop::external::ScanReport::export_all(&config).unwrap();
     workshop::external::ExternalSummary::export_all(&config).unwrap();
     downloads::BackendInfo::export_all(&config).unwrap();
+    downloads::BackendRelease::export_all(&config).unwrap();
+    maintenance::ApplicationInfo::export_all(&config).unwrap();
+    maintenance::UpdateInfo::export_all(&config).unwrap();
 }

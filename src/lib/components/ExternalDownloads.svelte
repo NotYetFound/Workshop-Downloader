@@ -26,7 +26,7 @@
   }
 </script>
 <Panel title="Existing downloads" description="Recognize content you already have, right where it is.">
-  <div class="field-row"><input aria-label="External download directory" bind:value={directory} placeholder="Select a Steam Workshop or DepotDownloader directory" disabled={busy} /><button class="button" onclick={choose} disabled={busy}>Browse</button></div>
+  <div class="field-row"><input aria-label="External download directory" bind:value={directory} placeholder="Select a Steam library, Workshop, or DepotDownloader directory" disabled={busy} /><button class="button" onclick={choose} disabled={busy}>Browse</button></div>
   <div class="field-row"><input aria-label="DepotDownloader Workshop URL" bind:value={workshopUrl} placeholder="Optional: matching Workshop item URL for DepotDownloader output" disabled={busy} /><button class="button" onclick={scan} disabled={busy || !directory}>{busy ? 'Scanning…' : 'Scan directory'}</button></div>
   <p class="field-note">Reads manifests and verifies files. Steam-managed and external files stay in their original location and are never changed.</p>
   {#if error}<p class="error-text" role="alert">{error}</p>{/if}

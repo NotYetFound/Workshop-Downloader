@@ -1,4 +1,5 @@
 fn main() {
+    println!("cargo:rerun-if-env-changed=WORKSHOP_UPDATER_PUBLIC_KEY");
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(
         tauri_build::AppManifest::new().commands(&[
             "get_settings",
@@ -25,7 +26,12 @@ fn main() {
             "retry_download",
             "cancel_download",
             "remove_download",
+            "clear_download_history",
             "download_logs",
+            "download_activity",
+            "terminal_sessions",
+            "open_download_logs_window",
+            "sync_download_auth_window",
             "download_prompt",
             "authenticate_download",
             "item_download_state",
@@ -33,6 +39,15 @@ fn main() {
             "open_download_folder",
             "download_backends",
             "open_backend_source",
+            "backend_release",
+            "install_backend",
+            "restore_backend",
+            "clear_backend_session",
+            "application_info",
+            "check_application_update",
+            "install_application_update",
+            "open_application_releases",
+            "export_diagnostics",
         ]),
     ))
     .expect("could not build the Tauri app manifest");

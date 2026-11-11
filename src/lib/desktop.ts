@@ -1,5 +1,10 @@
+import type { BackendRelease } from './contracts/BackendRelease';
+import type { ApplicationInfo } from './contracts/ApplicationInfo';
+import type { UpdateInfo } from './contracts/UpdateInfo';
+import type { TerminalSession } from './contracts/TerminalSession';
+import type { DownloadActivity } from './contracts/DownloadActivity';
 import { invoke } from '@tauri-apps/api/core';
-import { open } from '@tauri-apps/plugin-dialog';
+import { confirm, open, save } from '@tauri-apps/plugin-dialog';
 import type { AuthPrompt } from './contracts/AuthPrompt';
 import type { BackendChoice } from './contracts/BackendChoice';
 import type { BackendInfo } from './contracts/BackendInfo';
@@ -50,14 +55,38 @@ export const desktop = {
   queueDownload: (address: string, options: QueueOptions, previewId?: string) => invoke<DownloadJob>('queue_download', { address, options, previewId }),
   retryDownload: (id: string, options: QueueOptions) => invoke<void>('retry_download', { id, options }),
   cancelDownload: (id: string) => invoke<void>('cancel_download', { id }),
+  confirmClearHistory: () => confirm(
+    'Clear download records, batch history, and logs? Downloaded files and their badges will be kept.',
+    { title: 'Clear download history', kind: 'warning', okLabel: 'Clear history' },
+  ),
+  clearDownloadHistory: () => invoke<void>('clear_download_history'),
   removeDownload: (id: string) => invoke<void>('remove_download', { id }),
   downloadLogs: (id: string) => invoke<DownloadLog[]>('download_logs', { id }),
+  syncDownloadAuthWindow: () => invoke<void>('sync_download_auth_window'),
+  openDownloadLogs: () => invoke<void>('open_download_logs_window'),
+  terminalSessions: () => invoke<TerminalSession[]>('terminal_sessions'),
+  downloadActivity: () => invoke<DownloadActivity[]>('download_activity'),
   downloadPrompt: () => invoke<AuthPrompt | null>('download_prompt'),
   authenticateDownload: (id: string, response: string) => invoke<void>('authenticate_download', { id, response }),
   itemDownloadState: (id: string) => invoke<ItemDownloadState>('item_download_state', { id }),
   syncDownloadedBadges: () => invoke<void>('sync_downloaded_badges'),
   openDownloadFolder: (id: string, workshopItem = false) => invoke<void>('open_download_folder', { id, workshopItem }),
   downloadBackends: (settings: Settings, check = false) => invoke<BackendInfo[]>('download_backends', { settings, check }),
+  backendRelease: (backend: BackendChoice) => invoke<BackendRelease>('backend_release', { backend }),
+  installBackend: (backend: BackendChoice, source: string) => invoke<void>('install_backend', { backend, source }),
+  restoreBackend: (backend: BackendChoice) => invoke<void>('restore_backend', { backend }),
+  clearBackendSession: (backend: BackendChoice) => invoke<void>('clear_backend_session', { backend }),
+  applicationInfo: () => invoke<ApplicationInfo>('application_info'),
+  checkApplicationUpdate: () => invoke<UpdateInfo | null>('check_application_update'),
+  installApplicationUpdate: (version: string) => invoke<void>('install_application_update', { version }),
+  openApplicationReleases: () => invoke<void>('open_application_releases'),
+  exportDiagnostics: async () => {
+    const path = await save({ title: 'Export diagnostic activity', defaultPath: 'workshop-diagnostics.json',
+      filters: [{ name: 'JSON', extensions: ['json'] }] });
+    if (!path) return false;
+    await invoke<void>('export_diagnostics', { path });
+    return true;
+  },
   openBackendSource: (backend: BackendChoice) => invoke<void>('open_backend_source', { backend }),
   selectExecutable: () => open({ title: 'Choose a downloader executable', directory: false, multiple: false }),
   selectFolder: (defaultPath?: string) =>
@@ -80,3 +109,16 @@ export const backendNames: Record<BackendChoice, string> = {
   steamcmd: 'SteamCMD',
   depotDownloader: 'DepotDownloader',
 };
+
+export function usesDepotQr(settings: Settings, backend: BackendChoice) {
+  return backend === 'depotDownloader' && settings.depotQr;
+}
+
+export function signInAvailable(settings: Settings, backend: BackendChoice) {
+  return usesDepotQr(settings, backend) || Boolean(settings.steamAccount.trim());
+}
+
+export function downloadOptions(settings: Settings, backend: BackendChoice, signedIn: boolean, replace = false): QueueOptions {
+  const qr = signedIn && usesDepotQr(settings, backend);
+  return { backend, replace, account: signedIn && !qr ? settings.steamAccount.trim() : null, qr };
+}

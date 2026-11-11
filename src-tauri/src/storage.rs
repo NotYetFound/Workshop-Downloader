@@ -8,7 +8,7 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 use crate::{
     AppError, Result,
-    downloads::{DownloadJob, DownloadLog, InstalledItem, timestamp},
+    downloads::{DownloadActivity, DownloadJob, DownloadLog, InstalledItem, timestamp},
     settings::Settings,
     workshop::{DownloadBatch, WorkshopPreview, external::ExternalItem},
 };
@@ -169,6 +169,27 @@ impl Storage {
         Ok(())
     }
 
+    pub(crate) fn clear_download_history(&self) -> Result<()> {
+        let mut connection = self.lock()?;
+        let tx = connection.transaction()?;
+        let pending: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM download_jobs
+             WHERE json_extract(payload, '$.status') NOT IN ('completed', 'failed', 'cancelled'))",
+            [],
+            |row| row.get(0),
+        )?;
+        if pending {
+            return Err(AppError::Invalid(
+                "Finish or cancel queued downloads before clearing history.".into(),
+            ));
+        }
+        tx.execute_batch(
+            "DELETE FROM batch_jobs; DELETE FROM download_batches; DELETE FROM download_jobs;",
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn installed(&self) -> Result<Vec<InstalledItem>> {
         self.read_payloads("SELECT payload FROM installed_items")
     }
@@ -227,6 +248,23 @@ impl Storage {
             Ok(DownloadLog {
                 time: row.get(0)?,
                 message: row.get(1)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn download_activity(&self) -> Result<Vec<DownloadActivity>> {
+        let connection = self.lock()?;
+        let mut statement = connection.prepare(
+            "SELECT logs.time, json_extract(jobs.payload, '$.item.title'), logs.message
+             FROM download_logs logs JOIN download_jobs jobs ON jobs.id = logs.job_id
+             ORDER BY logs.id DESC LIMIT 300",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(DownloadActivity {
+                time: row.get(0)?,
+                title: row.get(1)?,
+                message: row.get(2)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -434,6 +472,49 @@ mod tests {
         assert_eq!(storage.batches().unwrap().len(), 1);
         assert_eq!(storage.jobs().unwrap().len(), 1);
         assert!(storage.external_items().unwrap().is_empty());
+    }
+
+    #[test]
+    fn clearing_history_keeps_downloaded_file_records_and_rejects_pending_jobs() {
+        let settings = Settings::new(test_root()).unwrap();
+        let storage =
+            Storage::initialize(Connection::open_in_memory().unwrap(), &settings).unwrap();
+        let item = WorkshopItem {
+            id: "123".into(),
+            app_id: 4000,
+            title: "Coast".into(),
+        };
+        let mut job = DownloadJob::new(item, &QueueOptions::default(), None);
+        let batch = DownloadBatch {
+            id: "batch".into(),
+            collection_id: None,
+            name: "Test".into(),
+            created_at: timestamp(),
+            items: vec![crate::workshop::BatchEntry {
+                item_id: "123".into(),
+                title: "Coast".into(),
+                job_id: Some(job.id.clone()),
+                skipped: false,
+                reason: None,
+            }],
+        };
+        storage.put_batch(&batch, &[job.clone()]).unwrap();
+        storage.log(&job.id, "Test log").unwrap();
+        assert!(storage.clear_download_history().is_err());
+        assert_eq!(storage.jobs().unwrap().len(), 1);
+        job.status = DownloadStatus::Completed;
+        let installed = InstalledItem {
+            job_id: job.id.clone(),
+            app_id: 4000,
+            item_id: "123".into(),
+            path: "fixture".into(),
+        };
+        storage.complete_job(&job, &installed).unwrap();
+        storage.clear_download_history().unwrap();
+        assert!(storage.jobs().unwrap().is_empty());
+        assert!(storage.batches().unwrap().is_empty());
+        assert!(storage.logs(&job.id).unwrap().is_empty());
+        assert_eq!(storage.installed().unwrap(), vec![installed]);
     }
 
     #[test]
