@@ -2,6 +2,8 @@
 
 Workshop Downloader browses Steam Workshop in a native desktop webview and downloads individual items, selections, and collections through SteamCMD or DepotDownloader.
 
+![Workshop Downloader browsing RimWorld mods with search filters and download controls](docs/screenshot.png)
+
 ## Build and run
 
 Use stable Rust and Node.js 22.12 or later in a supported release line. On Nobara and Fedora, install the [Tauri system prerequisites](https://v2.tauri.app/start/prerequisites/#linux). Linux downloads require [Landlock](https://docs.kernel.org/userspace-api/landlock.html) with ABI 3 or later enabled. On Windows, install [Visual Studio Build Tools with Desktop development with C++ and WebView2](https://v2.tauri.app/start/prerequisites/#windows). Interactive downloaders on Windows use ConPTY, available in Windows 10 version 1809 and later.
