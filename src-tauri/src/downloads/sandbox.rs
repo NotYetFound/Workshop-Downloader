@@ -44,6 +44,10 @@ pub fn exec(arguments: impl Iterator<Item = OsString>) -> Result<(), Box<dyn std
     if dotnet {
         arguments.next();
     }
+    let steam = arguments.peek().is_some_and(|arg| arg == "--steam-crash-dumps");
+    if steam {
+        arguments.next();
+    }
     let mut writable = Vec::new();
     while arguments.peek().is_some_and(|arg| arg != "--") {
         let directory = arguments.next().expect("argument was checked");
@@ -88,6 +92,48 @@ pub fn exec(arguments: impl Iterator<Item = OsString>) -> Result<(), Box<dyn std
             AccessFs::WriteFile | AccessFs::Truncate,
         ))?;
     }
+    if steam {
+        prepare_steam_crash_directory()?;
+    }
     rules.restrict_self()?;
     Err(Command::new(executable).args(arguments).exec().into())
+}
+
+fn prepare_steam_crash_directory() -> std::io::Result<()> {
+    use rustix::{
+        fs::{Mode, OFlags, fchmod, fstat, open},
+        process::geteuid,
+    };
+    use std::{fs::DirBuilder, io, os::unix::fs::DirBuilderExt};
+
+    // Valve's old bootstrap changes /tmp/dumps permissions during its first
+    // update. Its successor accepts a pre-existing sticky numbered directory.
+    // Preparing the directory avoids granting SteamCMD writes to shared /tmp.
+    for number in 1..=9 {
+        let path = format!("/tmp/dumps{number:02}");
+        let created = match DirBuilder::new().mode(0o1750).create(&path) {
+            Ok(()) => true,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => false,
+            Err(error) => return Err(error),
+        };
+        let Ok(directory) = open(
+            path.as_str(),
+            OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) else {
+            continue;
+        };
+        let stat = fstat(&directory)?;
+        if stat.st_uid != geteuid().as_raw() {
+            continue;
+        }
+        if created {
+            fchmod(&directory, Mode::from_raw_mode(0o1750))?;
+            return Ok(());
+        }
+        if stat.st_mode & 0o7777 == 0o1750 {
+            return Ok(());
+        }
+    }
+    Err(io::Error::other("SteamCMD could not reserve a safe crash-report directory in /tmp."))
 }

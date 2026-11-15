@@ -41,7 +41,6 @@ pub struct DownloadManager {
     worker: Mutex<Option<JoinHandle<()>>>,
     _instance: File,
     cache: Mutex<ContentCache>,
-    backend_checks: Mutex<Vec<BackendInfo>>,
 }
 
 #[derive(Default)]
@@ -56,6 +55,8 @@ struct Shared {
     storage: Arc<Storage>,
     root: PathBuf,
     providers: Vec<&'static dyn DownloadProvider>,
+    notices: Mutex<Vec<String>>,
+    backend_checks: Mutex<Vec<BackendInfo>>,
     state: Mutex<Scheduler>,
     wake: Condvar,
 }
@@ -131,6 +132,8 @@ impl DownloadManager {
             storage,
             root,
             providers,
+            notices: Mutex::default(),
+            backend_checks: Mutex::default(),
             state: Mutex::new(Scheduler::default()),
             wake: Condvar::new(),
         });
@@ -144,7 +147,6 @@ impl DownloadManager {
             worker: Mutex::new(Some(worker)),
             _instance: instance,
             cache: Mutex::new(ContentCache::default()),
-            backend_checks: Mutex::new(Vec::new()),
         })
     }
 
@@ -553,7 +555,7 @@ impl DownloadManager {
         let tools = self.shared.root.join("tools");
         if !check {
             let mut backends = providers::inspect(settings, &tools, None);
-            if let Ok(checks) = self.backend_checks.lock() {
+            if let Ok(checks) = self.shared.backend_checks.lock() {
                 for backend in &mut backends {
                     if let Some(check) = checks.iter().find(|check| {
                         check.backend == backend.backend && check.path == backend.path
@@ -575,10 +577,18 @@ impl DownloadManager {
         files::ensure_directory(&workspace, true)?;
         let result = providers::inspect(settings, &tools, Some(&workspace));
         let _ = fs::remove_dir_all(workspace);
-        if let Ok(mut checks) = self.backend_checks.lock() {
+        if let Ok(mut checks) = self.shared.backend_checks.lock() {
             checks.clone_from(&result);
         }
         Ok(result)
+    }
+
+    pub(crate) fn take_backend_notices(&self) -> Vec<String> {
+        self.shared
+            .notices
+            .lock()
+            .map(|mut notices| std::mem::take(&mut *notices))
+            .unwrap_or_default()
     }
 
     pub(crate) fn backend_release(&self, backend: BackendChoice) -> Result<super::BackendRelease> {
@@ -805,13 +815,24 @@ impl Shared {
         login: Option<&Login>,
     ) -> std::result::Result<(InstalledItem, u64), ProviderError> {
         let settings = self.storage.settings().map_err(from_files)?;
-        let candidates = providers::eligible(
+        let mut candidates = providers::eligible(
             &self.providers,
             &settings,
             job.requested_backend,
             login.is_some(),
             &self.root.join("tools"),
         );
+        if job.requested_backend == BackendChoice::Automatic
+            && let Ok(checks) = self.backend_checks.lock()
+        {
+            candidates.retain(|candidate| {
+                !checks.iter().any(|check| {
+                    check.backend == candidate.provider.id()
+                        && check.state == super::BackendState::Unavailable
+                        && check.path.as_deref() == candidate.executable.to_str()
+                })
+            });
+        }
         if candidates.is_empty() {
             return Err(ProviderError::new(
                 FailureKind::BackendUnavailable,
@@ -926,10 +947,6 @@ impl Shared {
                         }
                     },
                 );
-                if let Err(error) = result {
-                    // Keep authentication and ownership restrictions on the engine that reported them.
-                    return Err(error);
-                }
             }
             if let Some(error) = event_error {
                 return Err(from_files(error));
@@ -962,19 +979,41 @@ impl Shared {
                     }
                     return result;
                 }
-                Err(error)
-                    if !control.cancelled()
-                        && index + 1 < candidates.len()
-                        && error.kind.can_fallback() =>
-                {
-                    self.storage
-                        .log(
-                            &job.id,
-                            &format!("{} Trying the next eligible backend.", error.message),
-                        )
-                        .map_err(from_files)?;
+                Err(error) => {
+                    if control.cancelled() {
+                        return Err(error);
+                    }
+                    if error.kind == FailureKind::BackendUnavailable {
+                        self.storage
+                            .put_backend_issue(backend.id(), &error.message)
+                            .map_err(from_files)?;
+                        if let Ok(mut checks) = self.backend_checks.lock() {
+                            checks.retain(|check| check.backend != backend);
+                            checks.push(BackendInfo {
+                                backend,
+                                path: candidate.executable.to_str().map(str::to_owned),
+                                version: None,
+                                managed: false,
+                                can_restore: false,
+                                state: super::BackendState::Unavailable,
+                                message: None,
+                            });
+                        }
+                    }
+                    if index + 1 == candidates.len() || !error.kind.can_fallback() {
+                        return Err(error);
+                    }
+                    let notice = format!(
+                        "{}: {} Trying {} next.",
+                        backend.name(),
+                        error.message,
+                        candidates[index + 1].provider.id().name()
+                    );
+                    self.storage.log(&job.id, &notice).map_err(from_files)?;
+                    if let Ok(mut notices) = self.notices.lock() && notices.len() < 32 {
+                        notices.push(notice);
+                    }
                 }
-                Err(error) => return Err(error),
             }
         }
         unreachable!("the last eligible backend always returns");
@@ -1334,6 +1373,77 @@ mod tests {
 
     #[cfg(unix)]
     struct MockCli;
+
+    #[cfg(unix)]
+    struct FailingSteamCmd;
+
+    #[cfg(unix)]
+    impl DownloadProvider for FailingSteamCmd {
+        fn id(&self) -> BackendChoice {
+            BackendChoice::SteamCmd
+        }
+
+        fn detect(&self, settings: &Settings) -> Option<PathBuf> {
+            MockCli.detect(settings)
+        }
+
+        fn probe(
+            &self,
+            executable: &Path,
+            workspace: &Path,
+        ) -> std::result::Result<Option<String>, ProviderError> {
+            MockCli.probe(executable, workspace)
+        }
+
+        fn download(
+            &self,
+            _executable: &Path,
+            request: &DownloadRequest<'_>,
+            _control: &Control,
+            _report: &mut dyn FnMut(Event),
+        ) -> std::result::Result<providers::Payload, ProviderError> {
+            let (kind, message) = if request.item.id == "105" {
+                (FailureKind::InvalidItem, "Item not found.")
+            } else {
+                (FailureKind::BackendUnavailable, "Could not start SteamCMD.")
+            };
+            Err(ProviderError::new(kind, message))
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn automatic_falls_back_and_only_persists_backend_failures() {
+        let (root, storage, _) = fixture();
+        let manager = DownloadManager::with_providers(
+            storage.clone(),
+            root.path().join("engine"),
+            vec![&FailingSteamCmd, &MockCli],
+        )
+        .unwrap();
+        for (id, notice) in [
+            ("105", Some("Item not found.")),
+            ("106", Some("Could not start SteamCMD.")),
+            ("107", None),
+        ] {
+            let options = QueueOptions::default();
+            let queued = manager.enqueue(job(id, &options), options).unwrap();
+            wait_for(|| storage.job(&queued.id).unwrap().unwrap().status == DownloadStatus::Completed);
+            let saved = storage.job(&queued.id).unwrap().unwrap();
+            assert_eq!(saved.provider, BackendChoice::DepotDownloader.id());
+            let notices = manager.take_backend_notices();
+            match notice {
+                Some(message) => assert!(notices.iter().any(|notice| notice.contains(message))),
+                None => assert!(notices.is_empty()),
+            }
+            if id == "105" {
+                assert!(storage.backend_issues().unwrap().is_empty());
+            }
+        }
+        assert_eq!(storage.backend_issues().unwrap()["steamcmd"], "Could not start SteamCMD.");
+        storage.clear_backend_issue("steamcmd").unwrap();
+        assert!(storage.backend_issues().unwrap().is_empty());
+    }
 
     #[cfg(unix)]
     impl DownloadProvider for MockCli {

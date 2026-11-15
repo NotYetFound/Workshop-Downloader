@@ -24,7 +24,6 @@ import type { DownloadBatch } from './contracts/DownloadBatch';
 import type { BatchProgress } from './contracts/BatchProgress';
 import type { ContentStatus } from './contracts/ContentStatus';
 import type { ExternalSummary } from './contracts/ExternalSummary';
-import type { ScanReport } from './contracts/ScanReport';
 
 export const contentLabels: Record<ContentStatus, string> = {
   notDownloaded: 'Not downloaded', queued: 'Queued', downloading: 'Downloading', downloaded: 'Downloaded',
@@ -39,7 +38,6 @@ export const desktop = {
   cancelBatch: (id: string) => invoke<void>('cancel_batch', { id }),
   retryBatch: (id: string, options: QueueOptions) => invoke<void>('retry_batch', { id, options }),
   contentStates: () => invoke<Record<string, ItemDownloadState>>('content_states'),
-  scanExternal: (directory: string, workshopUrl: string | null) => invoke<ScanReport>('scan_external', { directory, workshopUrl }),
   openExternalFolder: (id: string, path: string) => invoke<void>('open_external_folder', { id, path }),
   externalItems: () => invoke<ExternalSummary[]>('list_external_items'),
   takeWorkshopPreview: () => invoke<string[] | null>('take_workshop_preview'),
@@ -53,6 +51,7 @@ export const desktop = {
   inspectItem: (address: string) => invoke<ItemInspection>('inspect_item', { address }),
   downloads: () => invoke<DownloadJob[]>('list_downloads'),
   queueDownload: (address: string, options: QueueOptions, previewId?: string) => invoke<DownloadJob>('queue_download', { address, options, previewId }),
+  queueDownloadById: (id: string, options: QueueOptions) => invoke<DownloadJob>('queue_download_by_id', { id, options }),
   retryDownload: (id: string, options: QueueOptions) => invoke<void>('retry_download', { id, options }),
   cancelDownload: (id: string) => invoke<void>('cancel_download', { id }),
   confirmClearHistory: () => confirm(
@@ -77,6 +76,9 @@ export const desktop = {
   restoreBackend: (backend: BackendChoice) => invoke<void>('restore_backend', { backend }),
   clearBackendSession: (backend: BackendChoice) => invoke<void>('clear_backend_session', { backend }),
   applicationInfo: () => invoke<ApplicationInfo>('application_info'),
+  backendNotices: () => invoke<string[]>('backend_notices'),
+  backendIssues: () => invoke<Record<string, string>>('backend_issues'),
+  clearBackendIssue: (backend: BackendChoice) => invoke<void>('clear_backend_issue', { backend }),
   checkApplicationUpdate: () => invoke<UpdateInfo | null>('check_application_update'),
   installApplicationUpdate: (version: string) => invoke<void>('install_application_update', { version }),
   openApplicationReleases: () => invoke<void>('open_application_releases'),
@@ -88,7 +90,10 @@ export const desktop = {
     return true;
   },
   openBackendSource: (backend: BackendChoice) => invoke<void>('open_backend_source', { backend }),
-  selectExecutable: () => open({ title: 'Choose a downloader executable', directory: false, multiple: false }),
+  executableLocations: () => invoke<string[]>('executable_locations'),
+  selectExecutable: (defaultPath?: string) => open({
+    title: 'Choose a downloader executable', directory: false, multiple: false, defaultPath,
+  }),
   selectFolder: (defaultPath?: string) =>
     open({ title: 'Choose a download directory', directory: true, multiple: false, defaultPath }),
 };

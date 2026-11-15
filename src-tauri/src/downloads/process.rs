@@ -187,6 +187,8 @@ pub(super) fn private_workspace(
             super::sandbox::prepare_dotnet_ipc()
                 .map_err(|error| process_error(error.to_string()))?;
             arguments.push("--dotnet-ipc".into());
+        } else {
+            arguments.push("--steam-crash-dumps".into());
         }
         arguments.push(workspace.as_os_str().into());
         if let Some(runtime) = runtime {

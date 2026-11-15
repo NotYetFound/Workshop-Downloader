@@ -67,7 +67,7 @@
     }
     return null;
   }
-  const labels = { downloaded: 'Downloaded', downloadedExternally: 'External', queued: 'Queued', downloading: 'Downloading', missingFiles: 'Missing files', failed: 'Failed' };
+  const labels = { downloaded: 'Downloaded', downloadedExternally: 'External', queued: 'Queued', downloading: 'Downloading', failed: 'Failed' };
   function badge(id) {
     const element = document.createElement('span');
     element.setAttribute(badgeAttribute, id);
@@ -78,7 +78,7 @@
     const label = labels[status];
     if (element.textContent !== label) element.textContent = label;
     element.title = status === 'downloadedExternally' ? 'Downloaded externally' : label;
-    const failure = ['missingFiles', 'failed'].includes(status);
+    const failure = status === 'failed';
     const active = ['queued', 'downloading'].includes(status);
     element.style.background = failure ? '#422c2c' : active ? '#253c50' : '#29382f';
     element.style.color = failure ? '#e9b2ad' : active ? '#a4d2f5' : '#add7ba';

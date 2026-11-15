@@ -1,9 +1,10 @@
-# Workshop Downloader 0.4.1
+# Workshop Downloader 0.4.2
 
-- Improves embedded Workshop resilience: a failed WebKit renderer is retried once with the software renderer, while Reload remains available for manual recovery.
-- Makes Workshop browsing smoother by throttling page-enhancement updates, avoiding duplicate status work, and limiting queue refreshes to download state rather than filesystem scans.
-- Fixes the live download counter so it reflects every queued job, not just the job currently running.
-- Uses SteamCMD's staged-byte information when available, so progress is measured rather than shown as an indeterminate back-and-forth animation.
+- Fixes managed SteamCMD setup on Linux by accommodating Valve's bootstrap crash-report directory behavior while retaining backend write isolation.
+- Automatic download selection now skips unavailable engines, falls back after engine startup and item-specific failures, and records startup issues in Preferences until cleared.
+- Adds Download by ID in Downloads, startup update checks, update controls in Preferences, and clearer first-run engine guidance.
+- Adds mounted-drive shortcuts to the executable chooser and removes the existing-download scanner from Preferences.
+- Removes Missing files badges from Workshop pages while retaining missing-file state in Downloads.
 
 ## Known limitations
 

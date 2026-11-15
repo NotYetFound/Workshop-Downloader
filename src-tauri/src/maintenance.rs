@@ -20,6 +20,8 @@ use crate::{
 const UPDATER_KEY: Option<&str> = option_env!("WORKSHOP_UPDATER_PUBLIC_KEY");
 const UPDATE_FEED: &str =
     "https://github.com/NotYetFound/Workshop-Downloader/releases/latest/download/latest.json";
+const RELEASE_API: &str =
+    "https://api.github.com/repos/NotYetFound/Workshop-Downloader/releases/latest";
 
 #[derive(Default)]
 pub(crate) struct PendingUpdate(Mutex<Option<Update>>);
@@ -70,12 +72,10 @@ fn update_key() -> std::result::Result<&'static str, &'static str> {
 
 #[tauri::command]
 pub(crate) async fn check_application_update(app: AppHandle) -> Result<Option<UpdateInfo>> {
-    let key = update_key().map_err(invalid)?;
+    let Ok(key) = update_key() else {
+        return check_public_release().await;
+    };
     let pending = app.state::<PendingUpdate>();
-    *pending
-        .0
-        .lock()
-        .map_err(|_| invalid("The updater is unavailable."))? = None;
     let update = app
         .updater_builder()
         .pubkey(key)
@@ -96,6 +96,32 @@ pub(crate) async fn check_application_update(app: AppHandle) -> Result<Option<Up
         .lock()
         .map_err(|_| invalid("The updater is unavailable."))? = update;
     Ok(info)
+}
+
+async fn check_public_release() -> Result<Option<UpdateInfo>> {
+    #[derive(serde::Deserialize)]
+    struct Release {
+        tag_name: String,
+        body: Option<String>,
+    }
+
+    let response = reqwest::Client::builder()
+        .user_agent(concat!("WorkshopDownloader/", env!("CARGO_PKG_VERSION")))
+        .timeout(Duration::from_secs(15))
+        .build()?
+        .get(RELEASE_API)
+        .send()
+        .await?
+        .error_for_status()?;
+    let release: Release = response.json().await?;
+    let version = semver::Version::parse(release.tag_name.trim_start_matches('v'))
+        .map_err(|_| invalid("GitHub returned an invalid release version."))?;
+    let current = semver::Version::parse(env!("CARGO_PKG_VERSION"))
+        .map_err(|_| invalid("The installed application version is invalid."))?;
+    Ok((version > current).then(|| UpdateInfo {
+        version: version.to_string(),
+        notes: release.body.unwrap_or_default(),
+    }))
 }
 
 #[tauri::command]

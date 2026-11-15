@@ -5,6 +5,7 @@
   import type { WorkshopPreview as PreviewModel } from './lib/contracts/WorkshopPreview';
   import type { BatchProgress } from './lib/contracts/BatchProgress';
   import { onMount, tick } from 'svelte';
+  import { confirm } from '@tauri-apps/plugin-dialog';
   import BrowserBar from './lib/components/BrowserBar.svelte';
   import DownloadProgress from './lib/components/DownloadProgress.svelte';
   import DownloadOptions from './lib/components/DownloadOptions.svelte';
@@ -146,7 +147,12 @@
   let requestedItem = $state<string | null>(null);
   let retryJob = $state<DownloadJob | null>(null);
   let downloadBusy = $state(false);
+  let idFormOpen = $state(false);
+  let workshopId = $state('');
+  let idError = $state('');
+  let idInput: HTMLInputElement | undefined = $state();
   let downloadAlert = $state<{ title: string; detail: string } | null>(null);
+  let downloadAlertTimer = 0;
   let recentCompletion = $state<DownloadJob | null>(null);
   let completionTimer: number | undefined;
   const currentDownload = $derived(
@@ -164,7 +170,9 @@
   let haveJobSnapshot = false;
 
   function showDownloadError(detail: string, title = 'Download issue') {
+    window.clearTimeout(downloadAlertTimer);
     downloadAlert = { title, detail };
+    downloadAlertTimer = window.setTimeout(() => downloadAlert = null, 8500);
   }
 
   function showCompletion(job: DownloadJob) {
@@ -275,6 +283,7 @@
 
   onMount(() => {
     void initialize();
+    const updateTimer = window.setTimeout(() => void checkForUpdate(), 2500);
     const timer = window.setInterval(() => {
       if (page === 'browse' && browser?.open && !navigating) {
         void refreshBrowser().catch((failure) => error = errorMessage(failure));
@@ -287,11 +296,40 @@
     return () => {
       void closeDownloadMenu();
       window.clearInterval(timer);
+      window.clearTimeout(updateTimer);
       window.clearInterval(downloadsTimer);
       window.clearTimeout(completionTimer);
+      window.clearTimeout(downloadAlertTimer);
       window.clearInterval(badgeTimer);
     };
   });
+
+  async function checkForUpdate() {
+    let available;
+    let info;
+    try {
+      [available, info] = await Promise.all([desktop.checkApplicationUpdate(), desktop.applicationInfo()]);
+    } catch {
+      // Startup checks are best-effort. Preferences shows errors from manual checks.
+      return;
+    }
+    if (!available) return;
+    try {
+      const canInstall = info.updaterEnabled && activeJobCount === 0;
+      const accepted = await confirm(
+        canInstall
+          ? `Workshop Downloader ${available.version} is available. Install it and restart now?`
+          : `Workshop Downloader ${available.version} is available.`,
+        { title: 'Workshop Downloader update', okLabel: canInstall ? 'Install and restart' : info.updaterEnabled ? 'Open Preferences' : 'View release', cancelLabel: 'Later' },
+      );
+      if (!accepted) return;
+      if (canInstall) await desktop.installApplicationUpdate(available.version);
+      else if (info.updaterEnabled) await showPage('settings');
+      else await desktop.openApplicationReleases();
+    } catch (failure) {
+      showDownloadError(errorMessage(failure), 'Application update');
+    }
+  }
 
   $effect(() => {
     const node = page === 'browse' && !preview && !previewLoading && !previewError ? slotElement : undefined;
@@ -387,12 +425,18 @@
       await desktop.syncDownloadAuthWindow().catch((failure) => showDownloadError(errorMessage(failure)));
       const nextJobs = await desktop.downloads();
       if (revision !== historyRevision) return;
+      const notices = await desktop.backendNotices().catch(() => []);
+      if (revision !== historyRevision) return;
+      if (notices.length) showDownloadError(notices.join(' '), 'Trying another download engine');
       if (haveJobSnapshot) {
         const changed = nextJobs.filter((job) => jobStatuses.get(job.id) !== job.status);
         const completed = changed.find((job) => job.status === 'completed');
         if (completed) showCompletion(completed);
         const failed = changed.find((job) => job.status === 'failed');
-        if (failed) showDownloadError(failed.error ?? 'The engine stopped before the download completed.', failed.item.title);
+        if (failed) {
+          const failure = failed.error ?? 'The engine stopped before the download completed.';
+          showDownloadError([...notices, failure].join(' '), failed.item.title);
+        }
       }
       queueOrder = updateQueueOrder(queueOrder, nextJobs, jobStatuses);
       jobStatuses = new Map(nextJobs.map((job) => [job.id, job.status]));
@@ -473,6 +517,36 @@
     } catch (failure) {
       showDownloadError(errorMessage(failure));
       return false;
+    } finally {
+      downloadBusy = false;
+    }
+  }
+
+  async function toggleIdForm() {
+    idFormOpen = !idFormOpen;
+    if (idFormOpen) {
+      retryJob = null;
+      await tick();
+      idInput?.focus();
+    }
+  }
+
+  async function submitWorkshopId(event: SubmitEvent) {
+    event.preventDefault();
+    if (!settings || downloadBusy || clearingHistory) return;
+    idError = '';
+    if (settings.signIn && !signInAvailable(settings, settings.backend)) {
+      idError = 'Enter your Steam account name in Preferences before downloading.';
+      return;
+    }
+    downloadBusy = true;
+    try {
+      await desktop.queueDownloadById(workshopId, downloadOptions(settings, settings.backend, settings.signIn));
+      workshopId = '';
+      idFormOpen = false;
+      await refreshDownloads();
+    } catch (failure) {
+      idError = errorMessage(failure);
     } finally {
       downloadBusy = false;
     }
@@ -616,7 +690,7 @@
               <span class="local-downloaded">{itemDownload.status === 'downloadedExternally' ? 'Downloaded externally' : 'Downloaded'}</span>
               <IconButton label="Open downloaded item folder" onclick={() => jobAction(() => desktop.openDownloadFolder(browser?.itemId ?? '', true))}><FolderOpen size={15} /></IconButton>
             {/if}
-            {#if itemDownload && !itemDownload.downloaded && itemDownload.status !== 'notDownloaded'}<span class="muted">{contentLabels[itemDownload.status]}</span>{/if}
+            {#if itemDownload && !itemDownload.downloaded && !['notDownloaded', 'missingFiles'].includes(itemDownload.status)}<span class="muted">{contentLabels[itemDownload.status]}</span>{/if}
             <button class="button" type="button" onclick={inspect} disabled={inspecting}>
               {inspecting ? 'Resolving…' : inspection ? 'Refresh details' : 'Inspect item'}
             </button>
@@ -668,13 +742,30 @@
             <p>{jobs.length} {jobs.length === 1 ? 'item' : 'items'} in your history{batches.length ? ' · ' + batches.length + (batches.length === 1 ? ' batch' : ' batches') : ''}</p>
             <div class="downloads-overview-actions">
               <span class="overview-chip" class:idle={!activeJobCount}>{activeJobCount} in progress</span>
+              <button class="button primary" type="button" aria-expanded={idFormOpen}
+                onclick={toggleIdForm} disabled={downloadBusy || clearingHistory}>Download by ID</button>
               <button class="button" type="button" onclick={clearHistory}
-                disabled={clearingHistory || activeJobCount > 0 || (!jobs.length && !batches.length)}
+                disabled={clearingHistory || downloadBusy || activeJobCount > 0 || (!jobs.length && !batches.length)}
                 title={activeJobCount ? 'Finish or cancel queued downloads first' : 'Clear download history'}>
                 Clear history
               </button>
             </div>
           </div>
+          {#if idFormOpen}
+            <form class="retry-panel download-id-form" onsubmit={submitWorkshopId}>
+              <label for="workshop-download-id">Workshop item ID</label>
+              <div class="field-row">
+                <input id="workshop-download-id" bind:this={idInput} bind:value={workshopId}
+                  type="text" inputmode="numeric" maxlength="20" placeholder="e.g. 867467808"
+                  autocomplete="off" required disabled={downloadBusy} oninput={() => idError = ''} />
+                <button class="button primary" type="submit" disabled={downloadBusy || clearingHistory || !workshopId.trim()}>
+                  {downloadBusy ? 'Queuing…' : 'Queue download'}
+                </button>
+                <button class="button" type="button" disabled={downloadBusy} onclick={toggleIdForm}>Cancel</button>
+              </div>
+              {#if idError}<p class="field-note error-text" role="alert">{idError}</p>{/if}
+            </form>
+          {/if}
           {#if retryJob}
             {#key retryJob.id}
               <div class="retry-panel">
@@ -702,7 +793,7 @@
       {/if}
 
       <div class="scroll-page" hidden={page !== 'settings'}>
-        <SettingsView {settings} {states} {setup} onSetup={() => setup = true} onCloseSetup={() => setup = false} onSaved={updateSettings} onImported={() => { void refreshDownloads(); void refreshItemDownload(); void refreshBadges(); }} />
+        <SettingsView {settings} {setup} onSetup={() => setup = true} onCloseSetup={() => setup = false} onSaved={updateSettings} />
       </div>
     {/if}
   </main>

@@ -57,7 +57,27 @@ pub(crate) async fn queue_download(
         })
         .await?;
     }
-    let metadata = client.resolve_metadata(&id, true).await?;
+    enqueue_item(app, &client, &id, options).await
+}
+
+#[tauri::command]
+pub(crate) async fn queue_download_by_id(
+    app: AppHandle,
+    client: State<'_, SteamClient>,
+    id: String,
+    options: QueueOptions,
+) -> Result<DownloadJob> {
+    let id = steam::validate_id(id.trim())?;
+    enqueue_item(app, &client, &id, options).await
+}
+
+async fn enqueue_item(
+    app: AppHandle,
+    client: &SteamClient,
+    id: &str,
+    options: QueueOptions,
+) -> Result<DownloadJob> {
+    let metadata = client.resolve_metadata(id, true).await?;
     let mut job = DownloadJob::new(metadata.item, &options, metadata.updated_at);
     job.expected_bytes = metadata.size_bytes;
     background(app, move |app| {
@@ -158,6 +178,81 @@ pub(crate) async fn open_download_folder(
         open_target(path.as_os_str())
     })
     .await
+}
+
+#[tauri::command]
+pub(crate) fn executable_locations() -> Result<Vec<String>> {
+    #[cfg(target_os = "linux")]
+    {
+        let mounts = std::fs::read("/proc/self/mountinfo")?;
+        Ok(mounted_locations(&String::from_utf8_lossy(&mounts)))
+    }
+    #[cfg(not(target_os = "linux"))]
+    Ok(Vec::new())
+}
+
+#[cfg(target_os = "linux")]
+fn mounted_locations(mounts: &str) -> Vec<String> {
+    let mut locations = std::collections::BTreeSet::new();
+    for line in mounts.lines() {
+        let Some((mount, filesystem)) = line.split_once(" - ") else {
+            continue;
+        };
+        let Some(path) = mount.split_ascii_whitespace().nth(4) else {
+            continue;
+        };
+        let mut filesystem = filesystem.split_ascii_whitespace();
+        let kind = filesystem.next().unwrap_or_default();
+        let source = filesystem.next().unwrap_or_default();
+        let storage = source.starts_with("/dev/") && !source.starts_with("/dev/loop")
+            || matches!(kind, "nfs" | "nfs4" | "cifs" | "smb3" | "fuse.sshfs" | "zfs");
+        let media = ["/mnt/", "/media/", "/run/media/"]
+            .iter()
+            .any(|prefix| path.starts_with(prefix));
+        if (storage || media) && path != "/" && !path.starts_with("/boot") {
+            locations.insert(
+                path.replace(r"\040", " ")
+                    .replace(r"\011", "\t")
+                    .replace(r"\012", "\n")
+                    .replace(r"\134", "\\"),
+            );
+        }
+    }
+    locations.into_iter().collect()
+}
+
+#[cfg(all(test, target_os = "linux"))]
+#[test]
+fn executable_locations_include_mounted_storage() {
+    let mounts = r"1 0 8:1 / / rw - ext4 /dev/sda1 rw
+2 1 0:2 / /proc rw - proc proc rw
+3 1 8:2 / /run/media/user/My\040Drive rw - exfat /dev/sdb1 rw
+4 1 0:4 / /storage/remote rw - nfs host:/share rw
+5 1 7:0 / /tmp/.mount_workshop rw - squashfs /dev/loop0 ro";
+    assert_eq!(
+        mounted_locations(mounts),
+        ["/run/media/user/My Drive", "/storage/remote"]
+    );
+}
+
+#[tauri::command]
+pub(crate) fn backend_notices(manager: State<'_, DownloadManager>) -> Vec<String> {
+    manager.take_backend_notices()
+}
+
+#[tauri::command]
+pub(crate) fn backend_issues(
+    storage: State<'_, Arc<Storage>>,
+) -> Result<std::collections::BTreeMap<String, String>> {
+    storage.backend_issues()
+}
+
+#[tauri::command]
+pub(crate) fn clear_backend_issue(
+    storage: State<'_, Arc<Storage>>,
+    backend: BackendChoice,
+) -> Result<()> {
+    storage.clear_backend_issue(backend.id())
 }
 
 #[tauri::command]

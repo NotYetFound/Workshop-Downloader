@@ -320,6 +320,9 @@ input::placeholder { color: var(--faint); opacity: 1; }
 .scroll-page .batch-panel .preview-actions { padding: 0 8px 12px; gap: 10px; }
 .scroll-page .batch-panel .field-note { margin-top: 0; margin-right: auto; }
 .scroll-page .retry-panel { border-radius: 15px; padding: 8px; }
+.scroll-page .download-id-form { display: grid; gap: 8px; padding: 12px; }
+.download-id-form .field-row { flex-wrap: wrap; }
+.download-id-form input { min-width: 120px; }
 .scroll-page .retry-panel > strong { display: block; padding: 10px 12px; }
 .scroll-page .download-options { border-bottom: 0; padding: 12px; border-radius: 16px; }
 
@@ -475,6 +478,8 @@ input::placeholder { color: var(--faint); opacity: 1; }
 .terminal-output pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px ui-monospace, monospace; }
 
 .backend-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.executable-locations { padding: 8px 0; }
+.executable-locations .button { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
 .update-notes { max-height: 180px; overflow: auto; white-space: pre-wrap; font: inherit; }
 .steam-qr { width: 100%; display: grid; justify-items: start; gap: 12px; }
 .steam-qr svg { width: min(224px, 100%); height: auto; }

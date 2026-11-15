@@ -36,7 +36,7 @@ impl Storage {
                 );
                 PRAGMA user_version = 1;",
             )?,
-            1..=3 => {}
+            1..=4 => {}
             _ => {
                 return Err(AppError::Invalid(
                     "The application database was created by a newer version.".into(),
@@ -78,6 +78,12 @@ impl Storage {
                  PRAGMA user_version = 3;"
             )?;
         }
+        if version < 4 {
+            tx.execute_batch(
+                "CREATE TABLE backend_issues (backend TEXT PRIMARY KEY, message TEXT NOT NULL);
+                 PRAGMA user_version = 4;",
+            )?;
+        }
         let exists = tx
             .query_row("SELECT 1 FROM settings WHERE singleton = 1", [], |_| Ok(()))
             .optional()?
@@ -98,6 +104,29 @@ impl Storage {
         self.0
             .lock()
             .map_err(|_| AppError::Invalid("The application database is unavailable.".into()))
+    }
+
+    pub fn put_backend_issue(&self, backend: &str, message: &str) -> Result<()> {
+        self.lock()?.execute(
+            "INSERT INTO backend_issues VALUES (?1, ?2)
+             ON CONFLICT(backend) DO UPDATE SET message = excluded.message",
+            [backend, message],
+        )?;
+        Ok(())
+    }
+
+    pub fn backend_issues(&self) -> Result<std::collections::BTreeMap<String, String>> {
+        let connection = self.lock()?;
+        let mut query = connection.prepare("SELECT backend, message FROM backend_issues")?;
+        Ok(query
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn clear_backend_issue(&self, backend: &str) -> Result<()> {
+        self.lock()?
+            .execute("DELETE FROM backend_issues WHERE backend = ?1", [backend])?;
+        Ok(())
     }
 
     pub fn settings(&self) -> Result<Settings> {
@@ -520,7 +549,7 @@ mod tests {
     #[test]
     fn rejects_newer_schema() {
         let connection = Connection::open_in_memory().unwrap();
-        connection.pragma_update(None, "user_version", 4).unwrap();
+        connection.pragma_update(None, "user_version", 5).unwrap();
         assert!(Storage::initialize(connection, &Settings::new(test_root()).unwrap()).is_err());
     }
 }

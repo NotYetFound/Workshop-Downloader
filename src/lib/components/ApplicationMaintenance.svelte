@@ -50,26 +50,26 @@
   <div class="backend-actions">
     <button class="button" type="button" onclick={onSetup} disabled={busy}>Open setup</button>
     <button class="button" type="button" onclick={() => perform(desktop.openDownloadLogs)} disabled={busy}>Debug</button>
-    {#if info?.updaterEnabled}
-      <button class="button" type="button" onclick={check} disabled={busy || disabled}>Check for app updates</button>
-    {/if}
-    <button class="button" type="button" disabled={busy}
-      onclick={() => perform(() => desktop.openApplicationReleases())}>GitHub Releases</button>
     <button class="button" type="button" disabled={busy} onclick={() => perform(async () => {
       if (await desktop.exportDiagnostics()) message = 'Diagnostics exported.';
     })}>Export diagnostics</button>
+    <button class="button" type="button" onclick={check} disabled={busy}>Check for updates</button>
+    <button class="button" type="button" disabled={busy}
+      onclick={() => perform(desktop.openApplicationReleases)}>GitHub Releases</button>
   </div>
-  <label class="toggle-row">
-    <span><strong>Verbose diagnostics</strong><small>Show additional backend lifecycle events in Debug.</small></span>
-    <input type="checkbox" class="switch" role="switch" bind:checked={verbose} />
-  </label>
   {#if info && !info.updaterEnabled}<p class="field-note">{info.updateMessage}</p>{/if}
   {#if update}
     {@const version = update.version}
     <p><strong>Version {version} is available</strong></p>
     {#if update.notes}<pre class="update-notes">{update.notes}</pre>{/if}
-    <button class="button primary" type="button" onclick={() => install(version)} disabled={busy || disabled}>Install update</button>
+    {#if info?.updaterEnabled}
+      <button class="button primary" type="button" onclick={() => install(version)} disabled={busy || disabled}>Install update</button>
+    {/if}
   {/if}
   {#if message}<p class="field-note" role="status">{message}</p>{/if}
   {#if error}<p class="field-note error-text" role="alert">{error}</p>{/if}
+  <label class="toggle-row">
+    <span><strong>Verbose diagnostics</strong><small>Show additional backend lifecycle events in Debug.</small></span>
+    <input type="checkbox" class="switch" role="switch" bind:checked={verbose} />
+  </label>
 </Panel>

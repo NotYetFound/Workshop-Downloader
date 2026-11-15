@@ -6,12 +6,10 @@
   import type { FolderNaming } from '../contracts/FolderNaming';
   import IconButton from './IconButton.svelte';
   import Panel from './Panel.svelte';
-  import ExternalDownloads from './ExternalDownloads.svelte';
-  import type { ItemDownloadState } from '../contracts/ItemDownloadState';
   import ApplicationMaintenance from './ApplicationMaintenance.svelte';
   import DownloadBackends from './DownloadBackends.svelte';
 
-  let { settings, onSaved, states, onImported, setup, onSetup, onCloseSetup }: { settings: Settings; onSaved: (value: Settings) => void; states: Record<string, ItemDownloadState>; onImported: () => void; setup: boolean; onSetup: () => void; onCloseSetup: () => void } = $props();
+  let { settings, onSaved, setup, onSetup, onCloseSetup }: { settings: Settings; onSaved: (value: Settings) => void; setup: boolean; onSetup: () => void; onCloseSetup: () => void } = $props();
 
   function copy(value: Settings): Settings {
     return { ...value, games: value.games.map((game) => ({ ...game })) };
@@ -81,6 +79,11 @@
 </script>
 
 <div class="settings-stack">
+  {#if setup}
+    <Panel title="Set up Workshop Downloader" description="Choose where mods go, then install or connect a download engine.">
+      <p class="field-note">You can open the Workshop before installing an engine. To revisit these choices later, open Preferences → Application and diagnostics → Open setup.</p>
+    </Panel>
+  {/if}
   <Panel className="settings-primary" title="Download destination">
     <label class="field-label" for="download-directory">Download directory</label>
     <div class="field-row">
@@ -145,7 +148,6 @@
   {/key}
 
   {#if !setup}
-    <ExternalDownloads {states} {onImported} />
     <ApplicationMaintenance bind:verbose={draft.verboseDiagnostics} disabled={saving || dirty} {onSetup} />
   {/if}
 

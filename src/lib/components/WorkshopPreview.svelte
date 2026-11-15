@@ -36,7 +36,7 @@
         <label class="preview-item">
           <input class="preview-check" type="checkbox" value={entry.id} bind:group={selected} disabled={busy || !entry.item || !!entry.unavailable || !eligible(entry.id)} />
           <span><strong>{entry.item?.title ?? 'Workshop item #' + entry.id}</strong><small>#{entry.id}{entry.item ? ' · App ' + entry.item.appId : ''}</small></span>
-          {#if entry.unavailable || status(entry.id) !== 'notDownloaded'}<small class:error-text={!!entry.unavailable}>{entry.unavailable ?? contentLabels[status(entry.id)]}</small>{/if}
+          {#if entry.unavailable || !['notDownloaded', 'missingFiles'].includes(status(entry.id))}<small class:error-text={!!entry.unavailable}>{entry.unavailable ?? contentLabels[status(entry.id)]}</small>{/if}
         </label>
       {:else}<p class="muted">No downloadable items in this collection.</p>{/each}
     </div>

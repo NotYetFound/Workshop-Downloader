@@ -51,14 +51,6 @@ On supported Steam browse/search cards, use the selection checkbox or compact do
 
 Collection metadata uses [Valve’s GetCollectionDetails and GetPublishedFileDetails endpoints](https://partner.steamgames.com/doc/webapi/ISteamRemoteStorage). The public metadata endpoint can omit file type, so the collection endpoint supplies the authoritative collection check. Nested traversal removes duplicates and detects repeated/cyclic collections. Limits are 2,000 unique items, 128 collections, and 16 nesting levels. Requests run serially in chunks of at most 50 IDs, with a minimum delay and bounded response size. Private/deleted items appear as unavailable; cross-game members cannot enter a collection batch. Queue admission rechecks public metadata and commits jobs and membership together.
 
-## Recognize existing content
-
-In **Preferences → Existing downloads**, choose a directory and scan. Steam/SteamCMD discovery reads `appworkshop_<appid>.acf` and its installed entries, then verifies the corresponding `content/<appid>/<publishedfileid>` tree. Choose a Steam installation to scan Workshop folders listed in `libraryfolders.vdf`, or select the Workshop directory containing its ACF files. Workshop Downloader inventory files are also recognized when present in copied exports.
-
-For DepotDownloader output containing `.DepotDownloader/<appid>_<manifest>.manifest`, supply the matching Workshop item URL. Valve’s published-file metadata must match both the game and content manifest ID. A manifest alone cannot reliably identify a published-file ID, so the app does not infer one from the folder name. Known manifest byte sizes must match the captured payload. Unidentifiable, unsafe, missing, or incomplete content produces scan notes.
-
-External records retain their source, path, and file inventory separately from app-managed installations. Scanning is read-only: it never adds markers to Steam folders, moves files, or allows external paths to become replacement targets. Repeated scans update the same identity/location record. Size and file inventory verification detects missing files and changed sizes; it does not claim cryptographic verification of every external file. Use a rescan after intentionally modifying external content.
-
 ## Destinations and recovery
 
 Preferences default to the operating system’s Downloads folder under `SteamWorkshop`. Game organization uses the saved game’s name, with its App ID added if two normalized game names collide. An unknown game uses a folder such as `App 322330`. A per-game override is used directly as the root. The default mod folder name is the Workshop title. You can also use title plus ID or ID alone. When Valve omits a title, the published-file ID is used.

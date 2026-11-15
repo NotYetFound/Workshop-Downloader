@@ -15,7 +15,7 @@ use super::{
 };
 use crate::{settings::Settings, steam::WorkshopItem};
 
-#[derive(Clone, Copy, Debug, Serialize, TS)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub enum BackendState {
     Missing,
@@ -429,7 +429,7 @@ fn prepare_steam_tool(source: &Path, tool: &Path) -> Result<PathBuf, ProviderErr
         });
         let Some(script) = script.filter(|_| binaries.join("steamcmd").is_file()) else {
             return Err(ProviderError::new(
-                FailureKind::Unsupported,
+                FailureKind::BackendUnavailable,
                 "Select steamcmd.sh from an extracted Valve SteamCMD installation, alongside its Linux binaries. Package launchers are not portable into the managed runtime.",
             ));
         };
@@ -489,19 +489,21 @@ fn depot_args(item: &WorkshopItem, directory: &Path, account: Option<&str>) -> V
 
 fn probe(id: BackendChoice, command: CommandBuilder) -> Result<Option<String>, ProviderError> {
     let mut version = None;
-    let mut sandbox_error = false;
+    let mut startup_error = None;
     let status = process::run(
         command,
         format!("{} version check", id.name()),
         &Control::default(),
-        Duration::from_secs(45),
+        Duration::from_secs(if id == BackendChoice::SteamCmd { 120 } else { 45 }),
         |event| {
             if let TerminalEvent::Line {
                 text: line,
                 complete: true,
             } = event
             {
-                sandbox_error |= sandbox_failed(line);
+                if sandbox_failed(line) || broken_backend(&line.to_ascii_lowercase()) {
+                    startup_error = Some(line.chars().take(300).collect::<String>());
+                }
                 let candidate = if id == BackendChoice::SteamCmd {
                     line.strip_prefix("Steam Console Client")
                         .and_then(|line| line.split("version ").nth(1))
@@ -520,8 +522,8 @@ fn probe(id: BackendChoice, command: CommandBuilder) -> Result<Option<String>, P
             }
         },
     )?;
-    if sandbox_error {
-        Err(sandbox_error_message())
+    if let Some(error) = startup_error {
+        Err(ProviderError::new(FailureKind::BackendUnavailable, error))
     } else if status.success() && version.is_some() {
         Ok(version)
     } else {
@@ -673,7 +675,8 @@ fn download(
         FailureKind::Ownership => {
             "Steam reported a license or ownership restriction for this item or game."
         }
-        FailureKind::InvalidItem => "Steam could not locate this Workshop item.",
+        FailureKind::InvalidItem => "The backend could not find or download this Workshop item.",
+        FailureKind::BackendUnavailable => "The backend failed to start. Check its executable and runtime dependencies in Preferences.",
         FailureKind::Network => {
             "Steam could not be reached or the download connection failed. You can retry."
         }
@@ -758,7 +761,7 @@ fn sandbox_failed(line: &str) -> bool {
 
 fn sandbox_error_message() -> ProviderError {
     ProviderError::new(
-        FailureKind::Files,
+        FailureKind::BackendUnavailable,
         "Linux backend write isolation could not start. Use a kernel with Landlock ABI 3 or later enabled.",
     )
 }
@@ -797,14 +800,32 @@ fn authentication_prompt(line: &str) -> Option<PromptKind> {
 
 fn failure_priority(kind: FailureKind) -> u8 {
     match kind {
+        FailureKind::BackendUnavailable => 4,
         FailureKind::Ownership | FailureKind::Authentication | FailureKind::InvalidItem => 3,
         FailureKind::Network => 2,
         _ => 1,
     }
 }
 
+fn broken_backend(line: &str) -> bool {
+    [
+        "error while loading shared libraries",
+        "exec format error",
+        "cannot execute: required file not found",
+        "fatal: steam cannot run",
+        "you must install or update .net",
+        "failed to load hostfxr",
+        "segmentation fault",
+        "bad system call",
+    ]
+    .iter()
+    .any(|text| line.contains(text))
+}
+
 fn classify(line: &str) -> Option<FailureKind> {
-    if ["unknown command", "unsupported workshop"]
+    if broken_backend(line) {
+        Some(FailureKind::BackendUnavailable)
+    } else if ["unknown command", "unsupported workshop"]
         .iter()
         .any(|text| line.contains(text))
     {
@@ -870,6 +891,11 @@ fn classify(line: &str) -> Option<FailureKind> {
     .any(|text| line.contains(text))
     {
         Some(FailureKind::Network)
+    } else if line.contains("failed to download item")
+        || line.contains("failed to download workshop item")
+        || line.contains("download item ") && line.contains(" failed")
+    {
+        Some(FailureKind::InvalidItem)
     } else {
         None
     }
@@ -971,7 +997,8 @@ mod tests {
             .is_empty()
         );
         assert!(FailureKind::Unsupported.can_fallback());
-        assert!(!FailureKind::Ownership.can_fallback());
+        assert!(FailureKind::Ownership.can_fallback());
+        assert!(!FailureKind::Authentication.can_fallback());
     }
 
     #[test]

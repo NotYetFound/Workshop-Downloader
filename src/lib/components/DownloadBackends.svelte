@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { untrack } from 'svelte';
+  import { onMount } from 'svelte';
   import { confirm } from '@tauri-apps/plugin-dialog';
   import { ExternalLink, FolderOpen } from '@lucide/svelte';
   import { backendNames, desktop, errorMessage } from '../desktop';
@@ -15,11 +15,35 @@
   let error = $state('');
   let message = $state('');
   let working = $state<BackendChoice | null>(null);
+  let issues = $state<Record<string, string>>({});
+  type ExecutableField = 'steamcmdPath' | 'depotDownloaderPath';
+  let locationPicker = $state<{ key: ExecutableField; paths: string[] } | null>(null);
+  let choosing = $state(false);
   let revision = 0;
   const backends = [
     { backend: 'steamcmd', key: 'steamcmdPath' },
     { backend: 'depotDownloader', key: 'depotDownloaderPath' },
   ] as const;
+
+  async function refreshIssues() {
+    issues = await desktop.backendIssues();
+  }
+
+  onMount(() => {
+    const poll = () => void refreshIssues().catch(() => {});
+    poll();
+    const timer = window.setInterval(poll, 2000);
+    return () => window.clearInterval(timer);
+  });
+
+  async function clearIssue(backend: BackendChoice) {
+    try {
+      await desktop.clearBackendIssue(backend);
+      await refreshIssues();
+    } catch (failure) {
+      error = errorMessage(failure);
+    }
+  }
 
   $effect(() => {
     const snapshot = $state.snapshot(settings);
@@ -43,10 +67,6 @@
       if (check) checking = false;
     }
   }
-
-  $effect(() => {
-    if (setup) void update(untrack(() => $state.snapshot(settings)), true);
-  });
 
   async function manage(backend: BackendChoice, action: 'install' | 'restore' | 'clear') {
     working = backend;
@@ -85,17 +105,40 @@
     }
   }
 
-  async function choose(key: 'steamcmdPath' | 'depotDownloaderPath') {
+  async function browse(key: ExecutableField) {
+    if (locationPicker?.key === key) {
+      locationPicker = null;
+      return;
+    }
+    choosing = true;
+    const paths = await desktop.executableLocations().catch(() => []);
+    choosing = false;
+    locationPicker = paths.length ? { key, paths } : null;
+    if (!paths.length) await choose(key);
+  }
+
+  async function choose(key: ExecutableField, location?: string) {
+    choosing = true;
+    error = '';
     try {
-      const path = await desktop.selectExecutable();
-      if (path) settings[key] = path;
+      const path = await desktop.selectExecutable(location ?? settings[key] ?? undefined);
+      if (path) {
+        settings[key] = path;
+        locationPicker = null;
+      }
     } catch (failure) {
       error = errorMessage(failure);
+    } finally {
+      choosing = false;
     }
   }
 </script>
 
 <Panel title="Download engines" description="Set your default engine and Steam sign-in preferences.">
+  {#if setup}
+    <p>New to Workshop Downloader? Use <strong>Set up</strong> for DepotDownloader, then keep <strong>Automatic</strong> as the default.</p>
+    <p class="field-note">Already have an engine? Browse to its executable and use Check backends to verify it. For SteamCMD on Linux, choose Valve’s extracted steamcmd.sh alongside its linux32 folder.</p>
+  {/if}
   <div class="backend-default">
     <label for="default-downloader">Default backend</label>
     <select id="default-downloader" bind:value={settings.backend} {disabled}>
@@ -131,10 +174,21 @@
       <input id={'executable-' + backend} placeholder={detected?.path ?? 'Detect automatically'} title={detected?.path}
         value={settings[key] ?? ''} oninput={(event) => settings[key] = event.currentTarget.value || null}
         spellcheck="false" disabled={disabled || checking || working !== null} />
-      <IconButton label={'Browse for ' + backendNames[backend]} onclick={() => choose(key)} disabled={disabled || checking || working !== null}><FolderOpen size={15} /></IconButton>
+      <IconButton label={'Browse for ' + backendNames[backend]} onclick={() => browse(key)} disabled={disabled || checking || choosing || working !== null}><FolderOpen size={15} /></IconButton>
       <IconButton label={'Open official ' + backendNames[backend] + ' setup page'} onclick={() => {
         void desktop.openBackendSource(backend).catch((failure) => error = errorMessage(failure));
       }}><ExternalLink size={15} /></IconButton>
+      {#if locationPicker?.key === key}
+        <div class="backend-note executable-locations" role="group" aria-label={'Browse locations for ' + backendNames[backend]}>
+          <p class="field-note">Mounted drives</p>
+          <div class="backend-actions">
+            {#each locationPicker.paths as path (path)}
+              <button class="button" type="button" title={path} disabled={choosing || disabled} onclick={() => choose(key, path)}>{path}</button>
+            {/each}
+            <button class="button" type="button" disabled={choosing || disabled} onclick={() => choose(key)}>Browse other locations…</button>
+          </div>
+        </div>
+      {/if}
       <div class="backend-note backend-actions">
         <button class="button" type="button" disabled={disabled || checking || working !== null} onclick={() => manage(backend, 'install')}>
           {working === backend ? 'Working…' : detected?.managed ? backend === 'steamcmd' ? 'Refresh bootstrap' : 'Check for update' : 'Set up'}
@@ -147,6 +201,12 @@
         {/if}
       </div>
       {#if detected?.message}<p class="field-note backend-note">{detected.message}</p>{/if}
+      {#if issues[backend]}
+        <div class="backend-note backend-actions">
+          <p class="field-note error-text">{issues[backend]}</p>
+          <button type="button" class="button" onclick={() => clearIssue(backend)}>Clear {backendNames[backend]} issue</button>
+        </div>
+      {/if}
     </div>
   {/each}
   <p class="field-note">One engine is enough. You can also choose a manually installed executable.</p>

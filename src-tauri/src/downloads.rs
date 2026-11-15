@@ -84,7 +84,10 @@ pub enum FailureKind {
 
 impl FailureKind {
     fn can_fallback(self) -> bool {
-        matches!(self, Self::BackendUnavailable | Self::Unsupported)
+        matches!(
+            self,
+            Self::BackendUnavailable | Self::Unsupported | Self::InvalidItem | Self::Ownership
+        )
     }
 }
 
